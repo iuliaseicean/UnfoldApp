@@ -1,0 +1,17 @@
+// lib/api.ts
+import axios from "axios";
+import { getToken } from "../hooks/useSecureStore";
+
+
+const api = axios.create({
+  baseURL: "http://192.168.0.108:4000", // IP-ul tău + portul backend-ului Node
+});
+
+api.interceptors.request.use(async (config) => {
+  const token = await getToken();
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  return config;
+});
+
+
+export default api;
