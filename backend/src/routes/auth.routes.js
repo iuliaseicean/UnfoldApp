@@ -9,14 +9,19 @@ router.post("/register", async (req, res, next) => {
   try {
     const { username, email, password } = req.body || {};
 
-    if (!username || !email || !password)
-      return res.status(400).json({ error: "username, email și password sunt obligatorii" });
+    if (!username || !email || !password) {
+      return res
+        .status(400)
+        .json({ error: "username, email și password sunt obligatorii" });
+    }
 
-    // verificam dacă email-ul e deja folosit
+    // verificăm dacă email-ul e deja folosit
     const exists = await User.findOne({ where: { email } });
-    if (exists) return res.status(409).json({ error: "Email already in use" });
+    if (exists) {
+      return res.status(409).json({ error: "Email already in use" });
+    }
 
-    // hash parola
+    // hash parolă
     const hashedPassword = await bcrypt.hash(password, 10);
 
     // creare utilizator
@@ -26,7 +31,7 @@ router.post("/register", async (req, res, next) => {
       password: hashedPassword,
     });
 
-    res.status(201).json({
+    return res.status(201).json({
       id: user.id,
       username: user.username,
       email: user.email,
@@ -41,14 +46,21 @@ router.post("/login", async (req, res, next) => {
   try {
     const { email, password } = req.body || {};
 
-    if (!email || !password)
-      return res.status(400).json({ error: "email și password necesare" });
+    if (!email || !password) {
+      return res
+        .status(400)
+        .json({ error: "email și password necesare" });
+    }
 
     const user = await User.findOne({ where: { email } });
-    if (!user) return res.status(401).json({ error: "Invalid credentials" });
+    if (!user) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
 
     const match = await bcrypt.compare(password, user.password);
-    if (!match) return res.status(401).json({ error: "Invalid credentials" });
+    if (!match) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
 
     const token = jwt.sign(
       { id: user.id, email: user.email },
@@ -56,13 +68,41 @@ router.post("/login", async (req, res, next) => {
       { expiresIn: "7d" }
     );
 
-    res.json({
+    return res.json({
       token,
       user: {
         id: user.id,
         username: user.username,
         email: user.email,
       },
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// FORGOT PASSWORD
+router.post("/forgot-password", async (req, res, next) => {
+  try {
+    const { email } = req.body || {};
+
+    if (!email) {
+      return res.status(400).json({ error: "email necesar" });
+    }
+
+    const user = await User.findOne({ where: { email } });
+
+    if (user) {
+      console.log("📧 Forgot password requested for:", user.email);
+      // Aici poți implementa logica reală:
+      //  - generezi un token
+      //  - îl salvezi în DB / tabel de reset-uri
+      //  - trimiți email cu link de reset
+    }
+
+    // răspuns generic, ca să nu dezvăluim dacă emailul există sau nu
+    return res.json({
+      message: "If this email exists, we sent you reset instructions.",
     });
   } catch (e) {
     next(e);
@@ -76,7 +116,7 @@ router.get("/me", auth, async (req, res, next) => {
       attributes: ["id", "username", "email", "bio", "createdAt", "updatedAt"],
     });
 
-    res.json(user);
+    return res.json(user);
   } catch (e) {
     next(e);
   }
