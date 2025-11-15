@@ -7,39 +7,79 @@ const auth = require("../middlewares/auth");
 // REGISTER
 router.post("/register", async (req, res, next) => {
   try {
-    const { name, email, password } = req.body || {};
-    if (!email || !password) return res.status(400).json({ error: "email & password required" });
+    const { username, email, password } = req.body || {};
 
+    if (!username || !email || !password)
+      return res.status(400).json({ error: "username, email și password sunt obligatorii" });
+
+    // verificam dacă email-ul e deja folosit
     const exists = await User.findOne({ where: { email } });
     if (exists) return res.status(409).json({ error: "Email already in use" });
 
-    const password_hash = await bcrypt.hash(password, 10);
-    const u = await User.create({ name: name || email.split("@")[0], email, password_hash });
-    res.status(201).json({ user_id: u.user_id, name: u.name, email: u.email });
-  } catch (e) { next(e); }
+    // hash parola
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // creare utilizator
+    const user = await User.create({
+      username,
+      email,
+      password: hashedPassword,
+    });
+
+    res.status(201).json({
+      id: user.id,
+      username: user.username,
+      email: user.email,
+    });
+  } catch (e) {
+    next(e);
+  }
 });
 
 // LOGIN
 router.post("/login", async (req, res, next) => {
   try {
     const { email, password } = req.body || {};
-    const u = await User.findOne({ where: { email } });
-    if (!u) return res.status(401).json({ error: "Invalid credentials" });
 
-    const ok = await bcrypt.compare(password, u.password_hash);
-    if (!ok) return res.status(401).json({ error: "Invalid credentials" });
+    if (!email || !password)
+      return res.status(400).json({ error: "email și password necesare" });
 
-    const token = jwt.sign({ id: u.user_id, email: u.email }, process.env.JWT_SECRET, { expiresIn: "7d" });
-    res.json({ token, user: { user_id: u.user_id, name: u.name, email: u.email } });
-  } catch (e) { next(e); }
+    const user = await User.findOne({ where: { email } });
+    if (!user) return res.status(401).json({ error: "Invalid credentials" });
+
+    const match = await bcrypt.compare(password, user.password);
+    if (!match) return res.status(401).json({ error: "Invalid credentials" });
+
+    const token = jwt.sign(
+      { id: user.id, email: user.email },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+      },
+    });
+  } catch (e) {
+    next(e);
+  }
 });
 
 // ME
 router.get("/me", auth, async (req, res, next) => {
   try {
-    const u = await User.findByPk(req.user.id, { attributes: ["user_id","name","email","avatar_url","bio","interests","created_at"] });
-    res.json(u);
-  } catch (e) { next(e); }
+    const user = await User.findByPk(req.user.id, {
+      attributes: ["id", "username", "email", "bio", "createdAt", "updatedAt"],
+    });
+
+    res.json(user);
+  } catch (e) {
+    next(e);
+  }
 });
 
 module.exports = router;

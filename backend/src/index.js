@@ -11,6 +11,9 @@ const User = require("./models/User");
 const Content = require("./models/Content");
 
 const app = express();
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
 
 // ── Middleware de bază
 app.use(

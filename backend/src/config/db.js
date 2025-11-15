@@ -7,10 +7,10 @@ const sequelize = new Sequelize(
   {
     host: process.env.MSSQL_HOST,
     dialect: "mssql",
-    logging: false,
+    logging: true,
     dialectOptions: {
       options: {
-        encrypt: true,
+        encrypt: false,
         trustServerCertificate: true,
         instanceName: process.env.MSSQL_INSTANCE
       }
