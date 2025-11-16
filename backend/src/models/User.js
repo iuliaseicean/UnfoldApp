@@ -15,7 +15,7 @@ const User = sequelize.define(
     },
     email: {
       type: DataTypes.STRING(150),
-      allowNull: false,   // 👈 FĂRĂ unique aici!
+      allowNull: false, // nu punem unique aici
     },
     password: {
       type: DataTypes.STRING(255),
@@ -25,15 +25,26 @@ const User = sequelize.define(
       type: DataTypes.STRING(255),
       allowNull: true,
     },
+
+    // 🔥 ADD – TOKEN RESET PAROLĂ
+    resetToken: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+
+    resetTokenExpire: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
   },
   {
-    tableName: "users",        // 👈 nu mai folosim [user] (cuvânt rezervat în SQL)
+    tableName: "users",
     timestamps: true,
     indexes: [
       {
         unique: true,
         fields: ["email"],
-        name: "UQ_users_email", // 👈 INDEX UNIC corect pt. MSSQL
+        name: "UQ_users_email",
       },
     ],
   }
