@@ -2,13 +2,15 @@ import axios from "axios";
 import { getToken } from "../hooks/useSecureStore";
 
 const api = axios.create({
-  baseURL: "http://192.168.1.78:4000",  // ← IP-ul din ipconfig + portul backend-ului
-  timeout: 10000,                       // opțional, 10 secunde
+  baseURL: process.env.EXPO_PUBLIC_API_URL,
+  timeout: 10000,
 });
 
 api.interceptors.request.use(async (config) => {
   const token = await getToken();
-  if (token) config.headers.Authorization = `Bearer ${token}`;
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
   return config;
 });
 
