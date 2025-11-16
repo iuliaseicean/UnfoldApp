@@ -11,19 +11,20 @@ const User = require("./models/User");
 const Content = require("./models/Content");
 
 const app = express();
+
+// ── Middleware de bază
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-
-// ── Middleware de bază
 app.use(
   cors({
     origin: process.env.CORS_ORIGIN || "*", // fallback dacă nu e setat în .env
   })
 );
+
 app.use(helmet());
-app.use(express.json());
 app.use(morgan("dev"));
+
 app.use(
   rateLimit({
     windowMs: 60_000, // 1 minut
@@ -46,12 +47,11 @@ app.use(require("./middlewares/error"));
   try {
     await connectDB();
 
-    // ⚠️ Dacă trebuie să recreezi tabelele de la zero (doar în dev!):
-    // await sequelize.sync({ force: true });
-
-    // Normal: sincronizare fără alter/force, ca să nu mai dea eroarea cu UNIQUE
+    // ⚠️ DEV: sincronizează schema DB cu modelele (adaugă coloane lipsă etc.)
+    // După ce totul e stabil, poți reveni la: await sequelize.sync();
     await sequelize.sync();
     console.log("📊 Tables synchronized");
+
 
     const PORT = process.env.PORT || 4000;
     app.listen(PORT, () => {
