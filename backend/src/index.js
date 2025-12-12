@@ -6,9 +6,16 @@ const morgan = require("morgan");
 const rateLimit = require("express-rate-limit");
 const { connectDB, sequelize } = require("./config/db");
 
+
 // modelele trebuie importate ca să înregistreze asocierile
 const User = require("./models/User");
 const Content = require("./models/Content");
+
+// capsule models (require e suficient ca să înregistreze asocierile)
+require("./models/Capsule");
+require("./models/CapsuleContribution");
+require("./models/CapsuleKey");
+require("./models/CapsuleAccess");
 
 const app = express();
 
@@ -38,6 +45,8 @@ app.get("/", (_req, res) => res.send("✅ Unfold API (SQL Server) is running"));
 // Rute
 app.use("/auth", require("./routes/auth.routes"));
 app.use("/content", require("./routes/content.routes"));
+app.use("/capsules", require("./routes/capsules.routes"));
+
 
 // Handler global erori (trebuie să fie după rute)
 app.use(require("./middlewares/error"));
