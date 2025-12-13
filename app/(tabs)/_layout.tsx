@@ -13,6 +13,7 @@ export default function TabLayout() {
           ),
         }}
       />
+
       <Tabs.Screen
         name="search"
         options={{
@@ -22,6 +23,7 @@ export default function TabLayout() {
           ),
         }}
       />
+
       <Tabs.Screen
         name="create"
         options={{
@@ -31,6 +33,7 @@ export default function TabLayout() {
           ),
         }}
       />
+
       <Tabs.Screen
         name="profile"
         options={{
@@ -40,6 +43,10 @@ export default function TabLayout() {
           ),
         }}
       />
+
+      {/* ❌ index NU apare în tab bar */}
+      <Tabs.Screen name="index" options={{ href: null }} />
+      <Tabs.Screen name="explore" options={{ href: null }} />
     </Tabs>
   );
 }

@@ -18,6 +18,16 @@ function addHours(date, hours) {
 async function refreshCapsuleStatus(capsule) {
   if (!capsule) return null;
 
+  // ✅ AUTO-OPEN dacă e locked și condițiile sunt îndeplinite
+  if (capsule.status === "locked") {
+    const check = await canOpenCapsule(capsule);
+    if (check.ok) {
+      capsule.status = "open";
+      capsule.opened_at = nowDate();
+      await capsule.save();
+    }
+  }
+
   // dacă e OPEN și a expirat visibility window -> ARCHIVED
   if (capsule.status === "open" && capsule.opened_at && capsule.visibility_duration != null) {
     const expiresAt = addHours(capsule.opened_at, capsule.visibility_duration);
@@ -31,15 +41,17 @@ async function refreshCapsuleStatus(capsule) {
   return capsule;
 }
 
+
 async function getUniqueContributorsCount(capsuleId) {
   const row = await CapsuleContribution.findOne({
     where: { capsule_id: capsuleId },
-    attributes: [[fn("COUNT", fn("DISTINCT", col("author_id"))), "cnt"]],
+    attributes: [[fn("COUNT", fn("DISTINCT", col("user_id"))), "cnt"]],
     raw: true
   });
 
   return Number(row?.cnt || 0);
 }
+
 
 async function userHasKeyAccess(capsuleId, userId) {
   const hit = await CapsuleAccess.findOne({ where: { capsule_id: capsuleId, user_id: userId } });

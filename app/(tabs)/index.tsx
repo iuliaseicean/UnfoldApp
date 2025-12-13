@@ -1,98 +1,312 @@
-import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  ActivityIndicator,
+  Pressable,
+  RefreshControl,
+  StyleSheet,
+} from "react-native";
+import { router, useFocusEffect } from "expo-router";
 
-import { HelloWave } from '@/components/hello-wave';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { Link } from 'expo-router';
+import ParallaxScrollView from "@/components/parallax-scroll-view";
+import { ThemedText } from "@/components/themed-text";
+import { ThemedView } from "@/components/themed-view";
+import { IconSymbol } from "@/components/ui/icon-symbol";
+import { Fonts } from "@/constants/theme";
+
+import { getCapsules } from "@/lib/capsules";
+
+// Tip minim (poți înlocui cu import din types dacă vrei)
+type Capsule = {
+  capsule_id: number;
+  title?: string | null;
+  description?: string | null;
+  capsule_type?: "time" | "co" | "key" | string;
+  status?: "locked" | "open" | "archived" | string;
+  open_at?: string | null;
+  required_contributors?: number | null;
+  created_at?: string | null;
+};
+
+function formatDate(value?: string | null) {
+  if (!value) return "";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString();
+}
+
+function statusLabel(status?: string) {
+  if (!status) return "Unknown";
+  if (status === "locked") return "Locked";
+  if (status === "open") return "Open";
+  if (status === "archived") return "Archived";
+  return status;
+}
 
 export default function HomeScreen() {
+  const [capsules, setCapsules] = useState<Capsule[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string>("");
+
+  const load = useCallback(async () => {
+    try {
+      setError("");
+      const data = await getCapsules();
+      setCapsules(Array.isArray(data) ? data : []);
+    } catch (e: any) {
+      setError(
+        "Nu am putut încărca capsulele. Verifică backend-ul și EXPO_PUBLIC_API_URL."
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // ✅ când revii în Home după Create/Details, se reîncarcă automat
+  useFocusEffect(
+    useCallback(() => {
+      load();
+    }, [load])
+  );
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await load();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [load]);
+
+  const headerImage = useMemo(
+    () => (
+      <IconSymbol
+        size={310}
+        color="#808080"
+        name="chevron.left.forwardslash.chevron.right"
+        style={styles.headerImage}
+      />
+    ),
+    []
+  );
+
   return (
     <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-      headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
-        />
-      }>
+      headerBackgroundColor={{ light: "#D0D0D0", dark: "#353636" }}
+      headerImage={headerImage}
+    >
       <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-        <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
-          <ThemedText type="defaultSemiBold">
-            {Platform.select({
-              ios: 'cmd + d',
-              android: 'cmd + m',
-              web: 'F12',
-            })}
-          </ThemedText>{' '}
-          to open developer tools.
+        <ThemedText type="title" style={{ fontFamily: Fonts.rounded }}>
+          Home
         </ThemedText>
       </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <Link href="/modal">
-          <Link.Trigger>
-            <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-          </Link.Trigger>
-          <Link.Preview />
-          <Link.Menu>
-            <Link.MenuAction title="Action" icon="cube" onPress={() => alert('Action pressed')} />
-            <Link.MenuAction
-              title="Share"
-              icon="square.and.arrow.up"
-              onPress={() => alert('Share pressed')}
-            />
-            <Link.Menu title="More" icon="ellipsis">
-              <Link.MenuAction
-                title="Delete"
-                icon="trash"
-                destructive
-                onPress={() => alert('Delete pressed')}
-              />
-            </Link.Menu>
-          </Link.Menu>
-        </Link>
 
-        <ThemedText>
-          {`Tap the Explore tab to learn more about what's included in this starter app.`}
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-        <ThemedText>
-          {`When you're ready, run `}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
-        </ThemedText>
-      </ThemedView>
+      <ThemedText style={styles.subtitle}>
+        Capsulele tale (și cele la care ai acces). Apasă pe una ca să vezi detalii.
+      </ThemedText>
+
+      {loading ? (
+        <ThemedView style={styles.center}>
+          <ActivityIndicator />
+          <ThemedText style={{ marginTop: 8 }}>Se încarcă...</ThemedText>
+        </ThemedView>
+      ) : error ? (
+        <ThemedView style={styles.errorBox}>
+          <ThemedText style={styles.errorTitle}>Eroare</ThemedText>
+          <ThemedText style={styles.errorText}>{error}</ThemedText>
+
+          <Pressable style={styles.retryBtn} onPress={load}>
+            <ThemedText style={styles.retryText}>Reîncearcă</ThemedText>
+          </Pressable>
+        </ThemedView>
+      ) : (
+        <ThemedView style={styles.list}>
+          {/* Pull-to-refresh hack pentru ParallaxScrollView */}
+          <ThemedView
+            style={styles.scrollHack}
+            // @ts-expect-error: ParallaxScrollView forwards props to ScrollView internally
+            refreshControl={
+              <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+            }
+          />
+
+          {capsules.length === 0 ? (
+            <ThemedView style={styles.emptyBox}>
+              <ThemedText style={styles.emptyTitle}>Nicio capsulă încă</ThemedText>
+              <ThemedText style={styles.emptyText}>
+                Creează una din tab-ul Create și va apărea aici.
+              </ThemedText>
+            </ThemedView>
+          ) : (
+            capsules.map((c) => {
+              const title = c.title?.trim() || "Untitled capsule";
+              const desc = c.description?.trim() || "";
+              const openAt = c.open_at ? formatDate(c.open_at) : "";
+
+              const metaLeft =
+                c.capsule_type === "co"
+                  ? `Contributors • ${c.required_contributors ?? "-"}`
+                  : c.capsule_type === "time"
+                  ? `Time • ${openAt ? `Open at ${openAt}` : "No date"}`
+                  : c.capsule_type || "Type";
+
+              const metaRight = statusLabel(c.status);
+
+              return (
+                <Pressable
+                  key={c.capsule_id}
+                  style={({ pressed }) => [
+                    styles.card,
+                    pressed && styles.cardPressed,
+                  ]}
+                  onPress={() =>
+                    router.push(`/capsule/${c.capsule_id}` as any)
+                  }
+                >
+                  <ThemedText style={styles.cardTitle}>{title}</ThemedText>
+
+                  {desc ? (
+                    <ThemedText numberOfLines={2} style={styles.cardDesc}>
+                      {desc}
+                    </ThemedText>
+                  ) : null}
+
+                  <ThemedView style={styles.cardMetaRow}>
+                    <ThemedText style={styles.cardMeta}>{metaLeft}</ThemedText>
+                    <ThemedText style={styles.cardMeta}>{metaRight}</ThemedText>
+                  </ThemedView>
+                </Pressable>
+              );
+            })
+          )}
+        </ThemedView>
+      )}
     </ParallaxScrollView>
   );
 }
 
 const styles = StyleSheet.create({
+  headerImage: {
+    color: "#808080",
+    bottom: -90,
+    left: -35,
+    position: "absolute",
+  },
+
   titleContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
     gap: 8,
+    alignItems: "center",
   },
-  stepContainer: {
-    gap: 8,
-    marginBottom: 8,
+
+  subtitle: {
+    marginTop: 6,
+    opacity: 0.85,
   },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
-    position: 'absolute',
+
+  center: {
+    marginTop: 24,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  list: {
+    marginTop: 16,
+    gap: 12,
+  },
+
+  scrollHack: {
+    height: 0,
+  },
+
+  card: {
+    borderRadius: 16,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+    backgroundColor: "rgba(255,255,255,0.06)",
+  },
+
+  cardPressed: {
+    transform: [{ scale: 0.99 }],
+    opacity: 0.9,
+  },
+
+  cardTitle: {
+    fontSize: 18,
+    fontFamily: Fonts.rounded,
+  },
+
+  cardDesc: {
+    marginTop: 6,
+    opacity: 0.85,
+  },
+
+  cardMetaRow: {
+    marginTop: 10,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+
+  cardMeta: {
+    fontSize: 12,
+    opacity: 0.75,
+  },
+
+  emptyBox: {
+    marginTop: 18,
+    padding: 16,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+    backgroundColor: "rgba(255,255,255,0.04)",
+  },
+
+  emptyTitle: {
+    fontSize: 16,
+    fontFamily: Fonts.rounded,
+    marginBottom: 6,
+  },
+
+  emptyText: {
+    opacity: 0.85,
+  },
+
+  errorBox: {
+    marginTop: 18,
+    padding: 16,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(255,0,0,0.25)",
+    backgroundColor: "rgba(255,0,0,0.06)",
+    gap: 10,
+  },
+
+  errorTitle: {
+    fontSize: 16,
+    fontFamily: Fonts.rounded,
+  },
+
+  errorText: {
+    opacity: 0.9,
+  },
+
+  retryBtn: {
+    alignSelf: "flex-start",
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.18)",
+    backgroundColor: "rgba(255,255,255,0.08)",
+  },
+
+  retryText: {
+    fontFamily: Fonts.rounded,
   },
 });

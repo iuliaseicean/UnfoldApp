@@ -111,10 +111,8 @@ export default function CreateScreen() {
       setLoading(true);
 
       // ✅ presupunere: backend are POST /posts
-      await api.post("/posts", {
-        text: text || null,
-        media_url,
-      });
+      await api.post("/content/posts", { content_text: text || null, media_url });
+
 
       Alert.alert("Succes", "Postarea a fost creată!");
       resetPostForm();
@@ -142,10 +140,11 @@ export default function CreateScreen() {
 
     // Validări pe tip
     let payload: any = {
-      title: cleanTitle,
-      description: cleanDesc || null,
-      capsule_type: mode, // "time" | "contributors" | "key"
+    title: cleanTitle,
+    description: cleanDesc || null,
+    capsule_type: mode === "contributors" ? "co" : mode,
     };
+
 
     if (mode === "time") {
       const iso = normalizeIsoDate(openAt);
@@ -194,7 +193,7 @@ export default function CreateScreen() {
       if (capsuleId) {
         goToCapsuleDetails(capsuleId);
       } else {
-        router.replace("/(tabs)/explore");
+        router.replace("/(tabs)/home");
       }
     } catch (e: any) {
       const msg = e?.response?.data?.message || e?.message || "Nu am putut crea capsula.";
