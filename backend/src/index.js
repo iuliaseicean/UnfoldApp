@@ -7,6 +7,8 @@ const rateLimit = require("express-rate-limit");
 const { connectDB, sequelize } = require("./config/db");
 
 
+
+
 // modelele trebuie importate ca să înregistreze asocierile
 const User = require("./models/User");
 const Content = require("./models/Content");
@@ -18,6 +20,7 @@ require("./models/CapsuleKey");
 require("./models/CapsuleAccess");
 
 const app = express();
+app.set("trust proxy", 1);
 
 // ── Middleware de bază
 app.use(express.json());

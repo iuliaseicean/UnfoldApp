@@ -18,8 +18,35 @@ export type PostItem = {
 
 export async function getPosts(): Promise<PostItem[]> {
   const res = await api.get("/content/posts");
-  return res.data;
+  const raw = res.data;
+
+  // suportă mai multe forme de răspuns
+  const arr = Array.isArray(raw)
+    ? raw
+    : Array.isArray(raw?.posts)
+    ? raw.posts
+    : Array.isArray(raw?.data)
+    ? raw.data
+    : [];
+
+  // normalizează cheile ca să se potrivească cu tipul tău
+  return arr.map((p: any) => ({
+    id: p.id,
+    user_id: p.user_id,
+    content_text: p.content_text,
+    media_url: p.media_url ?? null,
+    visibility: p.visibility,
+    created_at: p.created_at ?? p.createdAt, // backend trimite createdAt
+    User: p.User
+      ? {
+          id: p.User.id,
+          name: p.User.name ?? p.User.username ?? "User", // backend are username
+          avatar_url: p.User.avatar_url ?? null,
+        }
+      : undefined,
+  }));
 }
+
 
 export async function createPost(payload: {
   content_text: string;
