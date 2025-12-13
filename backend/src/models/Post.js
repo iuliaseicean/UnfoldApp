@@ -2,20 +2,31 @@ const { DataTypes } = require("sequelize");
 const { sequelize } = require("../config/db");
 const User = require("./User");
 
-const Post = sequelize.define("Post", {
-  post_id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
-  user_id: { type: DataTypes.INTEGER, allowNull: false },
-  content_text: { type: DataTypes.TEXT },
-  media_url: { type: DataTypes.STRING(255) },
-  visibility: { type: DataTypes.STRING(20), defaultValue: "public" },
-  created_at: { type: DataTypes.DATE, defaultValue: DataTypes.NOW }
-}, {
-  tableName: "post",
-  timestamps: false,
-  freezeTableName: true
-});
+const Post = sequelize.define(
+  "Post",
+  {
+    id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
 
-User.hasMany(Post, { foreignKey: "user_id" });
+    user_id: { type: DataTypes.INTEGER, allowNull: false },
+
+    content_text: { type: DataTypes.TEXT, allowNull: true },
+    media_url: { type: DataTypes.STRING, allowNull: true },
+
+    visibility: {
+      type: DataTypes.STRING(20),
+      allowNull: false,
+      defaultValue: "public",
+    },
+  },
+  {
+    tableName: "posts",
+    timestamps: true,
+    underscored: true, // asta îți creează created_at / updated_at
+  }
+);
+
+// asocieri
+User.hasMany(Post, { foreignKey: "user_id", onDelete: "CASCADE" });
 Post.belongsTo(User, { foreignKey: "user_id" });
 
 module.exports = Post;

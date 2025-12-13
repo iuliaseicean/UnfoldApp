@@ -1,112 +1,293 @@
-import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  ActivityIndicator,
+  Pressable,
+  RefreshControl,
+  StyleSheet,
+} from "react-native";
+import { router } from "expo-router";
 
-import { Collapsible } from '@/components/ui/collapsible';
-import { ExternalLink } from '@/components/external-link';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { IconSymbol } from '@/components/ui/icon-symbol';
-import { Fonts } from '@/constants/theme';
+import ParallaxScrollView from "@/components/parallax-scroll-view";
+import { ThemedText } from "@/components/themed-text";
+import { ThemedView } from "@/components/themed-view";
+import { IconSymbol } from "@/components/ui/icon-symbol";
+import { Fonts } from "@/constants/theme";
 
-export default function TabTwoScreen() {
+// ✅ asigură-te că există: lib/capsules.ts
+import { getCapsules } from "@/lib/capsules";
+
+// Tip minim (dacă ai deja types/capsule.ts, poți importa de acolo)
+type Capsule = {
+  capsule_id: number;
+  title?: string | null;
+  description?: string | null;
+  capsule_type?: "time" | "contributors" | string;
+  status?: "locked" | "open" | "archived" | string;
+  open_at?: string | null;
+  required_contributors?: number | null;
+  created_at?: string | null;
+};
+
+function formatDate(value?: string | null) {
+  if (!value) return "";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString();
+}
+
+function statusLabel(status?: string) {
+  if (!status) return "Unknown";
+  if (status === "locked") return "Locked";
+  if (status === "open") return "Open";
+  if (status === "archived") return "Archived";
+  return status;
+}
+
+export default function ExploreScreen() {
+  const [capsules, setCapsules] = useState<Capsule[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string>("");
+
+  const load = useCallback(async () => {
+    try {
+      setError("");
+      const data = await getCapsules();
+      setCapsules(Array.isArray(data) ? data : []);
+    } catch (e: any) {
+      setError("Nu am putut încărca capsulele. Verifică backend-ul și EXPO_PUBLIC_API_URL.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await load();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [load]);
+
+  const headerImage = useMemo(
+    () => (
+      <IconSymbol
+        size={310}
+        color="#808080"
+        name="chevron.left.forwardslash.chevron.right"
+        style={styles.headerImage}
+      />
+    ),
+    []
+  );
+
   return (
     <ParallaxScrollView
-      headerBackgroundColor={{ light: '#D0D0D0', dark: '#353636' }}
-      headerImage={
-        <IconSymbol
-          size={310}
-          color="#808080"
-          name="chevron.left.forwardslash.chevron.right"
-          style={styles.headerImage}
-        />
-      }>
+      headerBackgroundColor={{ light: "#D0D0D0", dark: "#353636" }}
+      headerImage={headerImage}
+    >
       <ThemedView style={styles.titleContainer}>
-        <ThemedText
-          type="title"
-          style={{
-            fontFamily: Fonts.rounded,
-          }}>
+        <ThemedText type="title" style={{ fontFamily: Fonts.rounded }}>
           Explore
         </ThemedText>
       </ThemedView>
-      <ThemedText>This app includes example code to help you get started.</ThemedText>
-      <Collapsible title="File-based routing">
-        <ThemedText>
-          This app has two screens:{' '}
-          <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> and{' '}
-          <ThemedText type="defaultSemiBold">app/(tabs)/explore.tsx</ThemedText>
-        </ThemedText>
-        <ThemedText>
-          The layout file in <ThemedText type="defaultSemiBold">app/(tabs)/_layout.tsx</ThemedText>{' '}
-          sets up the tab navigator.
-        </ThemedText>
-        <ExternalLink href="https://docs.expo.dev/router/introduction">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Android, iOS, and web support">
-        <ThemedText>
-          You can open this project on Android, iOS, and the web. To open the web version, press{' '}
-          <ThemedText type="defaultSemiBold">w</ThemedText> in the terminal running this project.
-        </ThemedText>
-      </Collapsible>
-      <Collapsible title="Images">
-        <ThemedText>
-          For static images, you can use the <ThemedText type="defaultSemiBold">@2x</ThemedText> and{' '}
-          <ThemedText type="defaultSemiBold">@3x</ThemedText> suffixes to provide files for
-          different screen densities
-        </ThemedText>
-        <Image
-          source={require('@/assets/images/react-logo.png')}
-          style={{ width: 100, height: 100, alignSelf: 'center' }}
-        />
-        <ExternalLink href="https://reactnative.dev/docs/images">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Light and dark mode components">
-        <ThemedText>
-          This template has light and dark mode support. The{' '}
-          <ThemedText type="defaultSemiBold">useColorScheme()</ThemedText> hook lets you inspect
-          what the user&apos;s current color scheme is, and so you can adjust UI colors accordingly.
-        </ThemedText>
-        <ExternalLink href="https://docs.expo.dev/develop/user-interface/color-themes/">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Animations">
-        <ThemedText>
-          This template includes an example of an animated component. The{' '}
-          <ThemedText type="defaultSemiBold">components/HelloWave.tsx</ThemedText> component uses
-          the powerful{' '}
-          <ThemedText type="defaultSemiBold" style={{ fontFamily: Fonts.mono }}>
-            react-native-reanimated
-          </ThemedText>{' '}
-          library to create a waving hand animation.
-        </ThemedText>
-        {Platform.select({
-          ios: (
-            <ThemedText>
-              The <ThemedText type="defaultSemiBold">components/ParallaxScrollView.tsx</ThemedText>{' '}
-              component provides a parallax effect for the header image.
-            </ThemedText>
-          ),
-        })}
-      </Collapsible>
+
+      <ThemedText style={styles.subtitle}>
+        Capsulele tale (și cele la care ai acces). Apasă pe una ca să vezi detalii.
+      </ThemedText>
+
+      {loading ? (
+        <ThemedView style={styles.center}>
+          <ActivityIndicator />
+          <ThemedText style={{ marginTop: 8 }}>Se încarcă...</ThemedText>
+        </ThemedView>
+      ) : error ? (
+        <ThemedView style={styles.errorBox}>
+          <ThemedText style={styles.errorTitle}>Eroare</ThemedText>
+          <ThemedText style={styles.errorText}>{error}</ThemedText>
+
+          <Pressable style={styles.retryBtn} onPress={load}>
+            <ThemedText style={styles.retryText}>Reîncearcă</ThemedText>
+          </Pressable>
+        </ThemedView>
+      ) : (
+        <ThemedView
+          style={styles.list}
+          // Pull-to-refresh pe scroll containerul din Parallax
+        >
+          <ThemedView
+            style={styles.scrollHack}
+            // @ts-expect-error: ParallaxScrollView forwards props to ScrollView internally
+            refreshControl={
+              <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+            }
+          />
+
+          {capsules.length === 0 ? (
+            <ThemedView style={styles.emptyBox}>
+              <ThemedText style={styles.emptyTitle}>Nicio capsulă încă</ThemedText>
+              <ThemedText style={styles.emptyText}>
+                Creează una din tab-ul Create și va apărea aici.
+              </ThemedText>
+            </ThemedView>
+          ) : (
+            capsules.map((c) => {
+              const title = c.title?.trim() || "Untitled capsule";
+              const desc = c.description?.trim() || "";
+              const openAt = c.open_at ? formatDate(c.open_at) : "";
+              const metaLeft =
+                c.capsule_type === "contributors"
+                  ? `Contributors • ${c.required_contributors ?? "-"}`
+                  : c.capsule_type === "time"
+                  ? `Time • ${openAt ? `Open at ${openAt}` : "No date"}`
+                  : c.capsule_type || "Type";
+
+              const metaRight = statusLabel(c.status);
+
+              return (
+                <Pressable
+                  key={c.capsule_id}
+                  style={({ pressed }) => [
+                    styles.card,
+                    pressed && styles.cardPressed,
+                  ]}
+                  onPress={() => {
+                    router.push(`/capsule/${c.capsule_id}` as any);
+                  }}
+                >
+                  <ThemedText style={styles.cardTitle}>{title}</ThemedText>
+                  {desc ? (
+                    <ThemedText numberOfLines={2} style={styles.cardDesc}>
+                      {desc}
+                    </ThemedText>
+                  ) : null}
+
+                  <ThemedView style={styles.cardMetaRow}>
+                    <ThemedText style={styles.cardMeta}>{metaLeft}</ThemedText>
+                    <ThemedText style={styles.cardMeta}>{metaRight}</ThemedText>
+                  </ThemedView>
+                </Pressable>
+              );
+            })
+          )}
+        </ThemedView>
+      )}
     </ParallaxScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   headerImage: {
-    color: '#808080',
+    color: "#808080",
     bottom: -90,
     left: -35,
-    position: 'absolute',
+    position: "absolute",
   },
   titleContainer: {
-    flexDirection: 'row',
+    flexDirection: "row",
     gap: 8,
+    alignItems: "center",
+  },
+  subtitle: {
+    marginTop: 6,
+    opacity: 0.85,
+  },
+
+  center: {
+    marginTop: 24,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  list: {
+    marginTop: 16,
+    gap: 12,
+  },
+
+  // hack: unele template-uri de Parallax nu expun direct refreshControl;
+  // asta previne warnings dacă componenta nu-l folosește.
+  scrollHack: {
+    height: 0,
+  },
+
+  card: {
+    borderRadius: 16,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+    backgroundColor: "rgba(255,255,255,0.06)",
+  },
+  cardPressed: {
+    transform: [{ scale: 0.99 }],
+    opacity: 0.9,
+  },
+  cardTitle: {
+    fontSize: 18,
+    fontFamily: Fonts.rounded,
+  },
+  cardDesc: {
+    marginTop: 6,
+    opacity: 0.85,
+  },
+  cardMetaRow: {
+    marginTop: 10,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  cardMeta: {
+    fontSize: 12,
+    opacity: 0.75,
+  },
+
+  emptyBox: {
+    marginTop: 18,
+    padding: 16,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+    backgroundColor: "rgba(255,255,255,0.04)",
+  },
+  emptyTitle: {
+    fontSize: 16,
+    fontFamily: Fonts.rounded,
+    marginBottom: 6,
+  },
+  emptyText: {
+    opacity: 0.85,
+  },
+
+  errorBox: {
+    marginTop: 18,
+    padding: 16,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(255,0,0,0.25)",
+    backgroundColor: "rgba(255,0,0,0.06)",
+    gap: 10,
+  },
+  errorTitle: {
+    fontSize: 16,
+    fontFamily: Fonts.rounded,
+  },
+  errorText: {
+    opacity: 0.9,
+  },
+  retryBtn: {
+    alignSelf: "flex-start",
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.18)",
+    backgroundColor: "rgba(255,255,255,0.08)",
+  },
+  retryText: {
+    fontFamily: Fonts.rounded,
   },
 });

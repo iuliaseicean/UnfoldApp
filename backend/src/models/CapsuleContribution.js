@@ -10,12 +10,18 @@ const CapsuleContribution = sequelize.define(
       type: DataTypes.INTEGER,
       allowNull: false,
       primaryKey: true,
+      references: { model: "capsule", key: "capsule_id" },
+      onDelete: "CASCADE",     // ok: capsule -> contributions
+      onUpdate: "CASCADE",
     },
 
     user_id: {
       type: DataTypes.INTEGER,
       allowNull: false,
       primaryKey: true,
+      references: { model: "users", key: "id" },
+      onDelete: "NO ACTION",   // IMPORTANT pentru SQL Server (evită multiple cascade paths)
+      onUpdate: "CASCADE",
     },
 
     content_text: {
@@ -41,11 +47,23 @@ const CapsuleContribution = sequelize.define(
   }
 );
 
-// relații
-Capsule.hasMany(CapsuleContribution, { foreignKey: "capsule_id", onDelete: "CASCADE" });
-CapsuleContribution.belongsTo(Capsule, { foreignKey: "capsule_id" });
+// Relații
+Capsule.hasMany(CapsuleContribution, {
+  foreignKey: "capsule_id",
+  onDelete: "CASCADE",
+  onUpdate: "CASCADE",
+});
+CapsuleContribution.belongsTo(Capsule, {
+  foreignKey: "capsule_id",
+});
 
-User.hasMany(CapsuleContribution, { foreignKey: "user_id", onDelete: "CASCADE" });
-CapsuleContribution.belongsTo(User, { foreignKey: "user_id" });
+User.hasMany(CapsuleContribution, {
+  foreignKey: "user_id",
+  onDelete: "NO ACTION", // IMPORTANT
+  onUpdate: "CASCADE",
+});
+CapsuleContribution.belongsTo(User, {
+  foreignKey: "user_id",
+});
 
 module.exports = CapsuleContribution;
