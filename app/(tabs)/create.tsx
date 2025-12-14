@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
 import {
   Alert,
+  Image,
   ImageBackground,
   KeyboardAvoidingView,
   Platform,
@@ -11,6 +12,7 @@ import {
   View,
 } from "react-native";
 import { router } from "expo-router";
+import * as ImagePicker from "expo-image-picker";
 
 import api from "@/lib/api";
 import { ThemedText } from "@/components/themed-text";
@@ -30,11 +32,22 @@ function parseOptionalInt(value: string): number | undefined {
 }
 
 function normalizeIsoDate(value: string) {
-  // Acceptă: "YYYY-MM-DD HH:mm" sau "YYYY-MM-DDTHH:mm"
   const v = value.trim();
   if (!v) return "";
   if (v.includes("T")) return v;
   return v.replace(" ", "T");
+}
+
+function getFilenameFromUri(uri: string) {
+  const last = uri.split("/").pop() || `upload-${Date.now()}.jpg`;
+  return last.includes(".") ? last : `${last}.jpg`;
+}
+
+function guessMimeType(uri: string) {
+  const lower = uri.toLowerCase();
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".heic") || lower.endsWith(".heif")) return "image/heic";
+  return "image/jpeg";
 }
 
 export default function CreateScreen() {
@@ -45,18 +58,22 @@ export default function CreateScreen() {
   const [description, setDescription] = useState("");
 
   // Time capsule
-  const [openAt, setOpenAt] = useState(""); // "2025-12-31 18:30" / "2025-12-31T18:30"
-  const [visibilityHours, setVisibilityHours] = useState(""); // opțional
+  const [openAt, setOpenAt] = useState("");
+  const [visibilityHours, setVisibilityHours] = useState("");
 
   // Co-Caps
   const [requiredContributors, setRequiredContributors] = useState("");
 
-  // Key Caps (MVP UI)
-  const [keyExpiresAt, setKeyExpiresAt] = useState(""); // opțional
+  // Key Caps
+  const [keyExpiresAt, setKeyExpiresAt] = useState("");
 
   // Post normal
   const [postText, setPostText] = useState("");
-  const [postMediaUrl, setPostMediaUrl] = useState(""); // opțional (URL)
+
+  // Media
+  const [localImageUri, setLocalImageUri] = useState<string | null>(null);
+  const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
 
   const [loading, setLoading] = useState(false);
 
@@ -86,7 +103,11 @@ export default function CreateScreen() {
 
   const resetPostForm = () => {
     setPostText("");
-    setPostMediaUrl("");
+  };
+
+  const resetMedia = () => {
+    setLocalImageUri(null);
+    setUploadedImageUrl(null);
   };
 
   const goToCapsuleDetails = (capsuleId: number) => {
@@ -96,28 +117,116 @@ export default function CreateScreen() {
     });
   };
 
+  // ─────────────────────────────────────────────
+  // 1) Pick / Camera
+  // ─────────────────────────────────────────────
+  const pickFromGallery = async () => {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      Alert.alert("Permisiune lipsă", "Te rog permite acces la galerie.");
+      return;
+    }
+
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      quality: 0.85,
+    });
+
+    if (!result.canceled) {
+      const uri = result.assets?.[0]?.uri;
+      if (uri) {
+        setLocalImageUri(uri);
+        setUploadedImageUrl(null);
+      }
+    }
+  };
+
+  const takePhoto = async () => {
+    const perm = await ImagePicker.requestCameraPermissionsAsync();
+    if (!perm.granted) {
+      Alert.alert("Permisiune lipsă", "Te rog permite acces la cameră.");
+      return;
+    }
+
+    const result = await ImagePicker.launchCameraAsync({ quality: 0.85 });
+
+    if (!result.canceled) {
+      const uri = result.assets?.[0]?.uri;
+      if (uri) {
+        setLocalImageUri(uri);
+        setUploadedImageUrl(null);
+      }
+    }
+  };
+
+  // ─────────────────────────────────────────────
+  // 2) Upload la backend → primești URL
+  // Endpoint așteptat: POST /upload  (multipart)
+  // ─────────────────────────────────────────────
+  const uploadSelectedImage = async () => {
+    if (!localImageUri) {
+      Alert.alert("Nu ai selectat poză", "Alege o poză din galerie sau fă una cu camera.");
+      return;
+    }
+    if (uploading) return;
+
+    try {
+      setUploading(true);
+
+      const filename = getFilenameFromUri(localImageUri);
+      const mime = guessMimeType(localImageUri);
+
+      const form = new FormData();
+      // @ts-ignore - RN FormData file type
+      form.append("file", {
+        uri: localImageUri,
+        name: filename,
+        type: mime,
+      });
+
+      const res = await api.post("/upload", form, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+
+      const url = res?.data?.url || res?.data?.fileUrl || res?.data?.path;
+      if (!url) throw new Error("Upload ok, dar serverul nu a returnat URL.");
+
+      setUploadedImageUrl(url);
+      Alert.alert("Succes", "Imaginea a fost încărcată!");
+    } catch (e: any) {
+      const msg = e?.response?.data?.message || e?.message || "Nu am putut încărca imaginea.";
+      Alert.alert("Eroare upload", msg);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  // ─────────────────────────────────────────────
+  // 3) Create Post
+  // ─────────────────────────────────────────────
   const handleCreatePost = async () => {
     if (loading) return;
 
     const text = postText.trim();
-    const media_url = postMediaUrl.trim() || null;
+    const media_url = uploadedImageUrl || null;
 
     if (!text && !media_url) {
-      Alert.alert("Lipsește conținutul", "Scrie un text sau adaugă un media_url.");
+      Alert.alert("Lipsește conținutul", "Scrie un text sau încarcă o poză.");
       return;
     }
 
     try {
       setLoading(true);
 
-      // ✅ presupunere: backend are POST /posts
-      await api.post("/content/posts", { content_text: text || null, media_url });
-
+      await api.post("/content/posts", {
+        content_text: text || null,
+        media_url,
+        visibility: "public",
+      });
 
       Alert.alert("Succes", "Postarea a fost creată!");
       resetPostForm();
-
-      // du-te la feed
+      resetMedia();
       router.replace("/(tabs)/home");
     } catch (e: any) {
       const msg = e?.response?.data?.message || e?.message || "Nu am putut crea postarea.";
@@ -127,6 +236,9 @@ export default function CreateScreen() {
     }
   };
 
+  // ─────────────────────────────────────────────
+  // 4) Create Capsule
+  // ─────────────────────────────────────────────
   const handleCreateCapsule = async () => {
     if (loading) return;
 
@@ -138,21 +250,18 @@ export default function CreateScreen() {
       return;
     }
 
-    // Validări pe tip
     let payload: any = {
-    title: cleanTitle,
-    description: cleanDesc || null,
-    capsule_type: mode === "contributors" ? "co" : mode,
+      title: cleanTitle,
+      description: cleanDesc || null,
+      capsule_type: mode === "contributors" ? "co" : mode,
+      cover_url: uploadedImageUrl || null,
+      media_url: uploadedImageUrl || null,
     };
-
 
     if (mode === "time") {
       const iso = normalizeIsoDate(openAt);
       if (!iso) {
-        Alert.alert(
-          "Lipsește data",
-          'Pentru Time Capsule completează "Open at" (ex: 2025-12-31 18:30).'
-        );
+        Alert.alert("Lipsește data", 'Pentru Time Capsule completează "Open at" (ex: 2025-12-31 18:30).');
         return;
       }
       payload.open_at = iso;
@@ -162,7 +271,7 @@ export default function CreateScreen() {
         Alert.alert("Valoare invalidă", "Visibility hours trebuie să fie un număr.");
         return;
       }
-      if (hours !== undefined) payload.visibility_duration = hours; // ore
+      if (hours !== undefined) payload.visibility_duration = hours;
     }
 
     if (mode === "contributors") {
@@ -176,7 +285,7 @@ export default function CreateScreen() {
 
     if (mode === "key") {
       const exp = normalizeIsoDate(keyExpiresAt);
-      if (exp) payload.key_expires_at = exp; // dacă backend-ul nu folosește încă, îl ignoră
+      if (exp) payload.key_expires_at = exp;
     }
 
     try {
@@ -189,12 +298,10 @@ export default function CreateScreen() {
 
       Alert.alert("Succes", "Capsula a fost creată!");
       resetCapsuleForm();
+      resetMedia();
 
-      if (capsuleId) {
-        goToCapsuleDetails(capsuleId);
-      } else {
-        router.replace("/(tabs)/home");
-      }
+      if (capsuleId) goToCapsuleDetails(capsuleId);
+      else router.replace("/(tabs)/home");
     } catch (e: any) {
       const msg = e?.response?.data?.message || e?.message || "Nu am putut crea capsula.";
       Alert.alert("Eroare", msg);
@@ -208,6 +315,19 @@ export default function CreateScreen() {
     return handleCreateCapsule();
   };
 
+  // Dacă există poză aleasă dar neuploadată, încercăm upload înainte de create
+  const ensureUploadedIfNeeded = async () => {
+    if (localImageUri && !uploadedImageUrl) {
+      await uploadSelectedImage();
+    }
+  };
+
+  const photoHint = uploadedImageUrl
+    ? "Uploaded ✓"
+    : localImageUri
+    ? "Selected • tap Upload"
+    : "Optional";
+
   return (
     <ImageBackground source={BG} style={styles.bg} resizeMode="cover">
       <View style={styles.bgOverlay} />
@@ -217,29 +337,58 @@ export default function CreateScreen() {
         behavior={Platform.select({ ios: "padding", android: undefined })}
       >
         <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-          <ThemedText
-            type="title"
-            style={{ fontFamily: Fonts.rounded, textAlign: "center", marginBottom: 6 }}
-          >
-            Create
-          </ThemedText>
-
-          <ThemedText style={styles.subtitle}>{subtitle}</ThemedText>
+          {/* Header */}
+          <View style={styles.header}>
+            <ThemedText type="title" style={styles.title}>
+              Create
+            </ThemedText>
+            <ThemedText style={styles.subtitle}>{subtitle}</ThemedText>
+          </View>
 
           <ThemedView style={styles.card}>
-            {/* Mode pills */}
+            {/* Pills */}
             <View style={styles.pillsRow}>
               <Pill label="Post" active={mode === "post"} onPress={() => setMode("post")} />
               <Pill label="Time" active={mode === "time"} onPress={() => setMode("time")} />
-              <Pill
-                label="Co-Caps"
-                active={mode === "contributors"}
-                onPress={() => setMode("contributors")}
-              />
+              <Pill label="Co-Caps" active={mode === "contributors"} onPress={() => setMode("contributors")} />
               <Pill label="Key" active={mode === "key"} onPress={() => setMode("key")} />
             </View>
 
-            {/* Content */}
+            {/* Photo - premium */}
+            <ThemedView style={styles.photoCard}>
+              <View style={styles.photoHeaderRow}>
+                <ThemedText style={styles.photoTitle}>Photo</ThemedText>
+                <View style={[styles.photoPill, uploadedImageUrl ? styles.photoPillOk : localImageUri ? styles.photoPillWarn : null]}>
+                  <ThemedText style={styles.photoPillText}>{photoHint}</ThemedText>
+                </View>
+              </View>
+
+              <View style={styles.photoButtonsRow}>
+                <SmallBtn label="Gallery" onPress={pickFromGallery} />
+                <SmallBtn label="Camera" onPress={takePhoto} />
+                <SmallBtn
+                  label={uploading ? "Uploading..." : uploadedImageUrl ? "Uploaded" : "Upload"}
+                  onPress={uploadSelectedImage}
+                  disabled={!localImageUri || uploading}
+                  tone={!localImageUri ? "muted" : uploadedImageUrl ? "success" : "primary"}
+                />
+              </View>
+
+              {!!localImageUri && (
+                <View style={styles.previewFrame}>
+                  <Image source={{ uri: localImageUri }} style={styles.previewImg} />
+                  <View style={styles.previewFade} />
+                </View>
+              )}
+
+              {(localImageUri || uploadedImageUrl) && (
+                <Pressable onPress={resetMedia} style={styles.removeRow}>
+                  <ThemedText style={styles.removeText}>Remove photo</ThemedText>
+                </Pressable>
+              )}
+            </ThemedView>
+
+            {/* CONTENT */}
             {mode === "post" ? (
               <ThemedView style={styles.section}>
                 <ThemedText style={styles.sectionTitle}>Postare normală</ThemedText>
@@ -254,19 +403,13 @@ export default function CreateScreen() {
                   multiline
                 />
 
-                <Label text="Media URL (optional)" />
-                <TextInput
-                  placeholder="https://..."
-                  placeholderTextColor="#9e9e9e"
-                  value={postMediaUrl}
-                  onChangeText={setPostMediaUrl}
-                  style={styles.input}
-                  autoCapitalize="none"
-                />
-
                 <Pressable
-                  style={[styles.primaryBtn, loading && styles.disabledBtn]}
-                  onPress={handleCreate}
+                  style={[styles.primaryBtn, (loading || uploading) && styles.disabledBtn]}
+                  onPress={async () => {
+                    await ensureUploadedIfNeeded();
+                    await handleCreate();
+                  }}
+                  disabled={loading || uploading}
                 >
                   <ThemedText style={styles.primaryBtnText}>
                     {loading ? "Creating..." : "Create post"}
@@ -351,8 +494,7 @@ export default function CreateScreen() {
                     <ThemedText style={styles.sectionTitle}>Key Caps</ThemedText>
 
                     <ThemedText style={styles.helper}>
-                      În MVP creăm capsula ca tip "key". După ce backend-ul returnează cheia/QR,
-                      o afișăm aici.
+                      În MVP creăm capsula ca tip "key". După ce backend-ul returnează cheia/QR, o afișăm aici.
                     </ThemedText>
 
                     <Label text="Key expires at (optional)" />
@@ -368,8 +510,12 @@ export default function CreateScreen() {
                 )}
 
                 <Pressable
-                  style={[styles.primaryBtn, loading && styles.disabledBtn]}
-                  onPress={handleCreate}
+                  style={[styles.primaryBtn, (loading || uploading) && styles.disabledBtn]}
+                  onPress={async () => {
+                    await ensureUploadedIfNeeded();
+                    await handleCreate();
+                  }}
+                  disabled={loading || uploading}
                 >
                   <ThemedText style={styles.primaryBtnText}>
                     {loading ? "Creating..." : "Create capsule"}
@@ -380,8 +526,7 @@ export default function CreateScreen() {
           </ThemedView>
 
           <ThemedText style={styles.footerHint}>
-            Ca să funcționeze “Create”, backend-ul trebuie să fie pornit (altfel primești Network
-            Error).
+            Ca să funcționeze “Create”, backend-ul trebuie să fie pornit.
           </ThemedText>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -399,11 +544,36 @@ function Pill({
   onPress: () => void;
 }) {
   return (
+    <Pressable onPress={onPress} style={[styles.pill, active ? styles.pillActive : styles.pillInactive]}>
+      <ThemedText style={[styles.pillText, active && styles.pillTextActive]}>{label}</ThemedText>
+    </Pressable>
+  );
+}
+
+function SmallBtn({
+  label,
+  onPress,
+  disabled,
+  tone = "default",
+}: {
+  label: string;
+  onPress: () => void;
+  disabled?: boolean;
+  tone?: "default" | "primary" | "success" | "muted";
+}) {
+  return (
     <Pressable
       onPress={onPress}
-      style={[styles.pill, active ? styles.pillActive : styles.pillInactive]}
+      disabled={disabled}
+      style={[
+        styles.smallBtn,
+        tone === "primary" && styles.smallBtnPrimary,
+        tone === "success" && styles.smallBtnSuccess,
+        tone === "muted" && styles.smallBtnMuted,
+        disabled && styles.btnDisabled,
+      ]}
     >
-      <ThemedText style={[styles.pillText, active && styles.pillTextActive]}>{label}</ThemedText>
+      <ThemedText style={styles.smallBtnText}>{label}</ThemedText>
     </Pressable>
   );
 }
@@ -416,7 +586,7 @@ const styles = StyleSheet.create({
   bg: { flex: 1 },
   bgOverlay: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(0,0,0,0.18)",
+    backgroundColor: "rgba(0,0,0,0.16)",
   },
 
   container: {
@@ -425,17 +595,26 @@ const styles = StyleSheet.create({
     gap: 10,
   },
 
+  header: {
+    alignItems: "center",
+    gap: 6,
+    marginBottom: 4,
+  },
+  title: {
+    fontFamily: Fonts.rounded,
+    textAlign: "center",
+  },
   subtitle: {
     textAlign: "center",
-    opacity: 0.9,
-    marginBottom: 8,
+    opacity: 0.88,
+    marginBottom: 2,
   },
 
   card: {
     borderRadius: 26,
     padding: 16,
     overflow: "hidden",
-    backgroundColor: "rgba(255,255,255,0.82)",
+    backgroundColor: "rgba(255,255,255,0.84)",
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.35)",
   },
@@ -459,7 +638,7 @@ const styles = StyleSheet.create({
     borderColor: "rgba(210, 140, 80, 0.55)",
   },
   pillInactive: {
-    backgroundColor: "rgba(255,255,255,0.55)",
+    backgroundColor: "rgba(255,255,255,0.58)",
     borderColor: "rgba(0,0,0,0.08)",
   },
   pillText: {
@@ -471,6 +650,113 @@ const styles = StyleSheet.create({
     opacity: 1,
   },
 
+  // Photo
+  photoCard: {
+    borderRadius: 20,
+    padding: 12,
+    backgroundColor: "rgba(255,255,255,0.55)",
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.06)",
+    marginBottom: 12,
+  },
+  photoHeaderRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 10,
+  },
+  photoTitle: {
+    fontFamily: Fonts.rounded,
+    fontSize: 16,
+  },
+  photoPill: {
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
+    backgroundColor: "rgba(255,255,255,0.75)",
+  },
+  photoPillOk: {
+    backgroundColor: "rgba(220, 255, 230, 0.8)",
+    borderColor: "rgba(0,0,0,0.08)",
+  },
+  photoPillWarn: {
+    backgroundColor: "rgba(255, 240, 210, 0.85)",
+    borderColor: "rgba(0,0,0,0.08)",
+  },
+  photoPillText: {
+    fontFamily: Fonts.rounded,
+    fontSize: 12,
+    opacity: 0.85,
+  },
+
+  photoButtonsRow: {
+    flexDirection: "row",
+    gap: 10,
+    justifyContent: "center",
+    marginTop: 10,
+    flexWrap: "wrap",
+  },
+
+  smallBtn: {
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
+    backgroundColor: "rgba(255,255,255,0.88)",
+  },
+  smallBtnPrimary: {
+    backgroundColor: "rgba(255, 220, 195, 0.95)",
+    borderColor: "rgba(210, 140, 80, 0.45)",
+  },
+  smallBtnSuccess: {
+    backgroundColor: "rgba(220, 255, 230, 0.85)",
+    borderColor: "rgba(0,0,0,0.08)",
+  },
+  smallBtnMuted: {
+    opacity: 0.6,
+  },
+  smallBtnText: {
+    fontFamily: Fonts.rounded,
+    fontSize: 14,
+    opacity: 0.9,
+  },
+  btnDisabled: {
+    opacity: 0.55,
+  },
+
+  previewFrame: {
+    marginTop: 12,
+    borderRadius: 18,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
+    backgroundColor: "rgba(0,0,0,0.04)",
+  },
+  previewImg: {
+    width: "100%",
+    height: 210,
+  },
+  previewFade: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(0,0,0,0.06)",
+  },
+
+  removeRow: {
+    alignSelf: "center",
+    marginTop: 10,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+  },
+  removeText: {
+    textDecorationLine: "underline",
+    opacity: 0.75,
+    fontSize: 13,
+  },
+
+  // Sections
   section: {
     padding: 12,
     borderRadius: 18,
@@ -493,7 +779,7 @@ const styles = StyleSheet.create({
   },
 
   input: {
-    backgroundColor: "rgba(255,255,255,0.9)",
+    backgroundColor: "rgba(255,255,255,0.92)",
     borderWidth: 1,
     borderColor: "rgba(0,0,0,0.08)",
     borderRadius: 14,
@@ -514,6 +800,7 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
 
+  // Primary CTA
   primaryBtn: {
     marginTop: 6,
     alignSelf: "center",
