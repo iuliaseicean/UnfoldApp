@@ -66,6 +66,8 @@ export default function CreateScreen() {
 
   // Key Caps
   const [keyExpiresAt, setKeyExpiresAt] = useState("");
+  const [keyPlain, setKeyPlain] = useState(""); // ✅ parola/cheia aleasă de creator
+  const [keyPlain2, setKeyPlain2] = useState(""); // ✅ confirmare
 
   // Post normal
   const [postText, setPostText] = useState("");
@@ -86,7 +88,7 @@ export default function CreateScreen() {
       case "contributors":
         return "Co-Caps (se deschide când contribuie N persoane)";
       case "key":
-        return "Key Caps (acces cu cheie / QR)";
+        return "Key Caps (QR + cheie)";
       default:
         return "";
     }
@@ -99,6 +101,8 @@ export default function CreateScreen() {
     setVisibilityHours("");
     setRequiredContributors("");
     setKeyExpiresAt("");
+    setKeyPlain("");
+    setKeyPlain2("");
   };
 
   const resetPostForm = () => {
@@ -161,7 +165,7 @@ export default function CreateScreen() {
 
   // ─────────────────────────────────────────────
   // 2) Upload la backend → primești URL
-  // Endpoint așteptat: POST /upload  (multipart)
+  // ✅ Endpoint-ul tău este /upload/image
   // ─────────────────────────────────────────────
   const uploadSelectedImage = async () => {
     if (!localImageUri) {
@@ -184,7 +188,8 @@ export default function CreateScreen() {
         type: mime,
       });
 
-      const res = await api.post("/upload", form, {
+      // ✅ corect: /upload/image
+      const res = await api.post("/upload/image", form, {
         headers: { "Content-Type": "multipart/form-data" },
       });
 
@@ -250,6 +255,22 @@ export default function CreateScreen() {
       return;
     }
 
+    // ✅ pentru key: ai nevoie de poză + cheie
+    if (mode === "key") {
+      if (!uploadedImageUrl) {
+        Alert.alert("Lipsește poza", "Pentru Key Caps trebuie să încarci o poză (Upload).");
+        return;
+      }
+      if (!keyPlain.trim() || keyPlain.trim().length < 4) {
+        Alert.alert("Cheie invalidă", "Alege o cheie de minim 4 caractere.");
+        return;
+      }
+      if (keyPlain.trim() !== keyPlain2.trim()) {
+        Alert.alert("Cheia nu coincide", "Confirmarea cheii nu este identică.");
+        return;
+      }
+    }
+
     let payload: any = {
       title: cleanTitle,
       description: cleanDesc || null,
@@ -261,7 +282,10 @@ export default function CreateScreen() {
     if (mode === "time") {
       const iso = normalizeIsoDate(openAt);
       if (!iso) {
-        Alert.alert("Lipsește data", 'Pentru Time Capsule completează "Open at" (ex: 2025-12-31 18:30).');
+        Alert.alert(
+          "Lipsește data",
+          'Pentru Time Capsule completează "Open at" (ex: 2025-12-31 18:30).'
+        );
         return;
       }
       payload.open_at = iso;
@@ -286,6 +310,9 @@ export default function CreateScreen() {
     if (mode === "key") {
       const exp = normalizeIsoDate(keyExpiresAt);
       if (exp) payload.key_expires_at = exp;
+
+      // ✅ CHEIE trimisă la backend (exact cum am pus în route: key_plain)
+      payload.key_plain = keyPlain.trim();
     }
 
     try {
@@ -296,7 +323,7 @@ export default function CreateScreen() {
       const capsuleId: number =
         res?.data?.capsule_id ?? res?.data?.id ?? res?.data?.capsule?.capsule_id;
 
-      Alert.alert("Succes", "Capsula a fost creată!");
+      Alert.alert("Succes", mode === "key" ? "Key capsule + QR creată!" : "Capsula a fost creată!");
       resetCapsuleForm();
       resetMedia();
 
@@ -315,7 +342,6 @@ export default function CreateScreen() {
     return handleCreateCapsule();
   };
 
-  // Dacă există poză aleasă dar neuploadată, încercăm upload înainte de create
   const ensureUploadedIfNeeded = async () => {
     if (localImageUri && !uploadedImageUrl) {
       await uploadSelectedImage();
@@ -337,7 +363,6 @@ export default function CreateScreen() {
         behavior={Platform.select({ ios: "padding", android: undefined })}
       >
         <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-          {/* Header */}
           <View style={styles.header}>
             <ThemedText type="title" style={styles.title}>
               Create
@@ -354,11 +379,16 @@ export default function CreateScreen() {
               <Pill label="Key" active={mode === "key"} onPress={() => setMode("key")} />
             </View>
 
-            {/* Photo - premium */}
+            {/* Photo */}
             <ThemedView style={styles.photoCard}>
               <View style={styles.photoHeaderRow}>
                 <ThemedText style={styles.photoTitle}>Photo</ThemedText>
-                <View style={[styles.photoPill, uploadedImageUrl ? styles.photoPillOk : localImageUri ? styles.photoPillWarn : null]}>
+                <View
+                  style={[
+                    styles.photoPill,
+                    uploadedImageUrl ? styles.photoPillOk : localImageUri ? styles.photoPillWarn : null,
+                  ]}
+                >
                   <ThemedText style={styles.photoPillText}>{photoHint}</ThemedText>
                 </View>
               </View>
@@ -462,10 +492,6 @@ export default function CreateScreen() {
                       style={styles.input}
                       keyboardType="numeric"
                     />
-
-                    <ThemedText style={styles.helper}>
-                      Tip: poți scrie și cu „T” (ex: 2025-12-31T18:30).
-                    </ThemedText>
                   </ThemedView>
                 )}
 
@@ -482,10 +508,6 @@ export default function CreateScreen() {
                       style={styles.input}
                       keyboardType="numeric"
                     />
-
-                    <ThemedText style={styles.helper}>
-                      Capsula se va deschide când contribuie cel puțin N persoane.
-                    </ThemedText>
                   </ThemedView>
                 )}
 
@@ -494,8 +516,30 @@ export default function CreateScreen() {
                     <ThemedText style={styles.sectionTitle}>Key Caps</ThemedText>
 
                     <ThemedText style={styles.helper}>
-                      În MVP creăm capsula ca tip "key". După ce backend-ul returnează cheia/QR, o afișăm aici.
+                      Setează o cheie. După creare, în feed va apărea un QR care se scanează pentru a debloca poza.
                     </ThemedText>
+
+                    <Label text="Cheie (min 4 caractere)" />
+                    <TextInput
+                      placeholder="Ex: unfold123"
+                      placeholderTextColor="#9e9e9e"
+                      value={keyPlain}
+                      onChangeText={setKeyPlain}
+                      style={styles.input}
+                      autoCapitalize="none"
+                      secureTextEntry
+                    />
+
+                    <Label text="Confirmă cheia" />
+                    <TextInput
+                      placeholder="Repetă cheia"
+                      placeholderTextColor="#9e9e9e"
+                      value={keyPlain2}
+                      onChangeText={setKeyPlain2}
+                      style={styles.input}
+                      autoCapitalize="none"
+                      secureTextEntry
+                    />
 
                     <Label text="Key expires at (optional)" />
                     <TextInput
@@ -526,7 +570,7 @@ export default function CreateScreen() {
           </ThemedView>
 
           <ThemedText style={styles.footerHint}>
-            Ca să funcționeze “Create”, backend-ul trebuie să fie pornit.
+            Backend-ul trebuie să fie pornit + ngrok (dacă testezi pe telefon).
           </ThemedText>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -584,31 +628,13 @@ function Label({ text }: { text: string }) {
 
 const styles = StyleSheet.create({
   bg: { flex: 1 },
-  bgOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(0,0,0,0.16)",
-  },
+  bgOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.16)" },
 
-  container: {
-    padding: 16,
-    paddingBottom: 28,
-    gap: 10,
-  },
+  container: { padding: 16, paddingBottom: 28, gap: 10 },
 
-  header: {
-    alignItems: "center",
-    gap: 6,
-    marginBottom: 4,
-  },
-  title: {
-    fontFamily: Fonts.rounded,
-    textAlign: "center",
-  },
-  subtitle: {
-    textAlign: "center",
-    opacity: 0.88,
-    marginBottom: 2,
-  },
+  header: { alignItems: "center", gap: 6, marginBottom: 4 },
+  title: { fontFamily: Fonts.rounded, textAlign: "center" },
+  subtitle: { textAlign: "center", opacity: 0.88, marginBottom: 2 },
 
   card: {
     borderRadius: 26,
@@ -619,38 +645,14 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255,255,255,0.35)",
   },
 
-  pillsRow: {
-    flexDirection: "row",
-    gap: 10,
-    flexWrap: "wrap",
-    justifyContent: "center",
-    marginBottom: 14,
-  },
+  pillsRow: { flexDirection: "row", gap: 10, flexWrap: "wrap", justifyContent: "center", marginBottom: 14 },
 
-  pill: {
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    borderRadius: 999,
-    borderWidth: 1,
-  },
-  pillActive: {
-    backgroundColor: "rgba(255, 220, 195, 0.95)",
-    borderColor: "rgba(210, 140, 80, 0.55)",
-  },
-  pillInactive: {
-    backgroundColor: "rgba(255,255,255,0.58)",
-    borderColor: "rgba(0,0,0,0.08)",
-  },
-  pillText: {
-    fontSize: 14,
-    opacity: 0.9,
-    fontFamily: Fonts.rounded,
-  },
-  pillTextActive: {
-    opacity: 1,
-  },
+  pill: { paddingVertical: 10, paddingHorizontal: 14, borderRadius: 999, borderWidth: 1 },
+  pillActive: { backgroundColor: "rgba(255, 220, 195, 0.95)", borderColor: "rgba(210, 140, 80, 0.55)" },
+  pillInactive: { backgroundColor: "rgba(255,255,255,0.58)", borderColor: "rgba(0,0,0,0.08)" },
+  pillText: { fontSize: 14, opacity: 0.9, fontFamily: Fonts.rounded },
+  pillTextActive: { opacity: 1 },
 
-  // Photo
   photoCard: {
     borderRadius: 20,
     padding: 12,
@@ -659,16 +661,8 @@ const styles = StyleSheet.create({
     borderColor: "rgba(0,0,0,0.06)",
     marginBottom: 12,
   },
-  photoHeaderRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: 10,
-  },
-  photoTitle: {
-    fontFamily: Fonts.rounded,
-    fontSize: 16,
-  },
+  photoHeaderRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 10 },
+  photoTitle: { fontFamily: Fonts.rounded, fontSize: 16 },
   photoPill: {
     paddingVertical: 6,
     paddingHorizontal: 10,
@@ -677,27 +671,11 @@ const styles = StyleSheet.create({
     borderColor: "rgba(0,0,0,0.08)",
     backgroundColor: "rgba(255,255,255,0.75)",
   },
-  photoPillOk: {
-    backgroundColor: "rgba(220, 255, 230, 0.8)",
-    borderColor: "rgba(0,0,0,0.08)",
-  },
-  photoPillWarn: {
-    backgroundColor: "rgba(255, 240, 210, 0.85)",
-    borderColor: "rgba(0,0,0,0.08)",
-  },
-  photoPillText: {
-    fontFamily: Fonts.rounded,
-    fontSize: 12,
-    opacity: 0.85,
-  },
+  photoPillOk: { backgroundColor: "rgba(220, 255, 230, 0.8)" },
+  photoPillWarn: { backgroundColor: "rgba(255, 240, 210, 0.85)" },
+  photoPillText: { fontFamily: Fonts.rounded, fontSize: 12, opacity: 0.85 },
 
-  photoButtonsRow: {
-    flexDirection: "row",
-    gap: 10,
-    justifyContent: "center",
-    marginTop: 10,
-    flexWrap: "wrap",
-  },
+  photoButtonsRow: { flexDirection: "row", gap: 10, justifyContent: "center", marginTop: 10, flexWrap: "wrap" },
 
   smallBtn: {
     paddingVertical: 10,
@@ -707,25 +685,11 @@ const styles = StyleSheet.create({
     borderColor: "rgba(0,0,0,0.08)",
     backgroundColor: "rgba(255,255,255,0.88)",
   },
-  smallBtnPrimary: {
-    backgroundColor: "rgba(255, 220, 195, 0.95)",
-    borderColor: "rgba(210, 140, 80, 0.45)",
-  },
-  smallBtnSuccess: {
-    backgroundColor: "rgba(220, 255, 230, 0.85)",
-    borderColor: "rgba(0,0,0,0.08)",
-  },
-  smallBtnMuted: {
-    opacity: 0.6,
-  },
-  smallBtnText: {
-    fontFamily: Fonts.rounded,
-    fontSize: 14,
-    opacity: 0.9,
-  },
-  btnDisabled: {
-    opacity: 0.55,
-  },
+  smallBtnPrimary: { backgroundColor: "rgba(255, 220, 195, 0.95)", borderColor: "rgba(210, 140, 80, 0.45)" },
+  smallBtnSuccess: { backgroundColor: "rgba(220, 255, 230, 0.85)" },
+  smallBtnMuted: { opacity: 0.6 },
+  smallBtnText: { fontFamily: Fonts.rounded, fontSize: 14, opacity: 0.9 },
+  btnDisabled: { opacity: 0.55 },
 
   previewFrame: {
     marginTop: 12,
@@ -735,28 +699,12 @@ const styles = StyleSheet.create({
     borderColor: "rgba(0,0,0,0.08)",
     backgroundColor: "rgba(0,0,0,0.04)",
   },
-  previewImg: {
-    width: "100%",
-    height: 210,
-  },
-  previewFade: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(0,0,0,0.06)",
-  },
+  previewImg: { width: "100%", height: 210 },
+  previewFade: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.06)" },
 
-  removeRow: {
-    alignSelf: "center",
-    marginTop: 10,
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-  },
-  removeText: {
-    textDecorationLine: "underline",
-    opacity: 0.75,
-    fontSize: 13,
-  },
+  removeRow: { alignSelf: "center", marginTop: 10, paddingVertical: 6, paddingHorizontal: 10 },
+  removeText: { textDecorationLine: "underline", opacity: 0.75, fontSize: 13 },
 
-  // Sections
   section: {
     padding: 12,
     borderRadius: 18,
@@ -765,18 +713,9 @@ const styles = StyleSheet.create({
     borderColor: "rgba(0,0,0,0.06)",
     marginBottom: 12,
   },
+  sectionTitle: { fontFamily: Fonts.rounded, fontSize: 16, marginBottom: 10 },
 
-  sectionTitle: {
-    fontFamily: Fonts.rounded,
-    fontSize: 16,
-    marginBottom: 10,
-  },
-
-  label: {
-    marginBottom: 6,
-    opacity: 0.75,
-    fontSize: 13,
-  },
+  label: { marginBottom: 6, opacity: 0.75, fontSize: 13 },
 
   input: {
     backgroundColor: "rgba(255,255,255,0.92)",
@@ -789,18 +728,10 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
 
-  multiline: {
-    minHeight: 90,
-    textAlignVertical: "top",
-  },
+  multiline: { minHeight: 90, textAlignVertical: "top" },
 
-  helper: {
-    opacity: 0.75,
-    fontSize: 13,
-    marginTop: 2,
-  },
+  helper: { opacity: 0.75, fontSize: 13, marginTop: 2 },
 
-  // Primary CTA
   primaryBtn: {
     marginTop: 6,
     alignSelf: "center",
@@ -811,19 +742,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(210, 140, 80, 0.55)",
   },
-  primaryBtnText: {
-    fontFamily: Fonts.rounded,
-    fontSize: 16,
-  },
+  primaryBtnText: { fontFamily: Fonts.rounded, fontSize: 16 },
 
-  disabledBtn: {
-    opacity: 0.65,
-  },
+  disabledBtn: { opacity: 0.65 },
 
-  footerHint: {
-    textAlign: "center",
-    opacity: 0.8,
-    marginTop: 4,
-    fontSize: 12,
-  },
+  footerHint: { textAlign: "center", opacity: 0.8, marginTop: 4, fontSize: 12 },
 });

@@ -10,6 +10,8 @@ import {
   View,
 } from "react-native";
 import { router, useFocusEffect } from "expo-router";
+import * as Linking from "expo-linking";
+import QRCode from "react-native-qrcode-svg";
 
 import { ThemedText } from "@/components/themed-text";
 import { ThemedView } from "@/components/themed-view";
@@ -30,9 +32,11 @@ type Capsule = {
   created_at?: string | null;
   required_contributors?: number | null;
 
-  // ✅ dacă există în backend (ai pus în create payload)
   cover_url?: string | null;
   media_url?: string | null;
+
+  // opțional (dacă backend returnează direct qr_url ca DataURL base64)
+  qr_url?: string | null;
 };
 
 type FeedItem =
@@ -126,11 +130,24 @@ export default function HomeScreen() {
     return a;
   }, [capsules, posts]);
 
+  // ✅ QR pentru key capsule trebuie să ducă la ruta REALĂ din app:
+  // app/capsule/key/[id].tsx  => "/capsule/key/:id"
+  const makeKeyDeepLink = (capsuleId: number) => {
+    // exp://.../--/capsule/key/123
+    return Linking.createURL(`/capsule/key/${capsuleId}`);
+  };
+
+  const goToKeyUnlock = (capsuleId: number) => {
+    router.push(`/capsule/key/${capsuleId}` as any);
+  };
+
   return (
     <ImageBackground source={BG} style={{ flex: 1 }}>
       <ScrollView
         contentContainerStyle={styles.container}
-        refreshControl={<RefreshControl refreshing={refreshing || loading} onRefresh={onRefresh} />}
+        refreshControl={
+          <RefreshControl refreshing={refreshing || loading} onRefresh={onRefresh} />
+        }
       >
         {/* Header */}
         <View style={styles.headerRow}>
@@ -172,19 +189,47 @@ export default function HomeScreen() {
 
               const title = c.title?.trim() || "Untitled capsule";
               const desc = c.description?.trim() || "";
-              const cover = c.cover_url || c.media_url || null;
 
               const type = typeLabel(c.capsule_type, c.required_contributors);
               const st = statusPill(c.status);
 
+              const isKey = c.capsule_type === "key";
+
+              // ✅ Key capsule: nu arăta poza; arată QR (sau qr_url din backend dacă e DataURL)
+              const cover = !isKey ? c.cover_url || c.media_url || null : null;
+
+              const qrValue = makeKeyDeepLink(c.capsule_id);
+
               return (
                 <Pressable
                   key={`c-${c.capsule_id}-${idx}`}
-                  onPress={() => router.push(`/capsule/${c.capsule_id}` as any)}
+                  onPress={() => {
+                    if (isKey) return goToKeyUnlock(c.capsule_id);
+                    return router.push(`/capsule/${c.capsule_id}` as any);
+                  }}
                   style={({ pressed }) => [styles.capsuleCard, pressed && styles.cardPressed]}
                 >
-                  {/* cover */}
-                  {cover ? (
+                  {/* TOP / COVER */}
+                  {isKey ? (
+                    <View style={styles.keyTop}>
+                      <View style={styles.keyBadgesRow}>
+                        <Badge text={type} tone="neutral" />
+                        <Badge text={st.text} tone={st.tone} />
+                      </View>
+
+                      <View style={styles.qrWrap}>
+                        <View style={styles.qrCard}>
+                          {/* dacă backend-ul returnează qr_url ca DataURL -> îl poți afișa ca <Image>.
+                              DAR tu folosești generator local, deci folosim QRCode cu deep link intern */}
+                          <QRCode value={qrValue} size={140} />
+                        </View>
+
+                        <ThemedText style={styles.qrHint}>
+                          Scanează QR-ul sau apasă „Unlock”
+                        </ThemedText>
+                      </View>
+                    </View>
+                  ) : cover ? (
                     <View style={styles.coverWrap}>
                       <Image source={{ uri: cover }} style={styles.coverImg} />
                       <View style={styles.coverShade} />
@@ -200,7 +245,7 @@ export default function HomeScreen() {
                     </View>
                   )}
 
-                  {/* content */}
+                  {/* BODY */}
                   <View style={styles.capsuleBody}>
                     <ThemedText style={styles.cardTitle}>{title}</ThemedText>
 
@@ -216,10 +261,15 @@ export default function HomeScreen() {
                       </ThemedText>
 
                       <Pressable
-                        onPress={() => router.push(`/capsule/${c.capsule_id}` as any)}
+                        onPress={() => {
+                          if (isKey) return goToKeyUnlock(c.capsule_id);
+                          return router.push(`/capsule/${c.capsule_id}` as any);
+                        }}
                         style={({ pressed }) => [styles.openBtn, pressed && { opacity: 0.9 }]}
                       >
-                        <ThemedText style={styles.openBtnText}>Open</ThemedText>
+                        <ThemedText style={styles.openBtnText}>
+                          {isKey ? "Unlock" : "Open"}
+                        </ThemedText>
                       </Pressable>
                     </View>
                   </View>
@@ -227,7 +277,7 @@ export default function HomeScreen() {
               );
             }
 
-            // post
+            // POST
             const p = item.post;
             const img = (p as any)?.media_url || (p as any)?.mediaUrl || null;
 
@@ -302,22 +352,12 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(0,0,0,0.08)",
   },
-  fabMiniText: {
-    fontFamily: Fonts.rounded,
-    fontSize: 22,
-    opacity: 0.9,
-  },
+  fabMiniText: { fontFamily: Fonts.rounded, fontSize: 22, opacity: 0.9 },
 
   center: { marginTop: 24, alignItems: "center", justifyContent: "center" },
-
   empty: { textAlign: "center", opacity: 0.7, marginTop: 18 },
+  cardPressed: { transform: [{ scale: 0.995 }], opacity: 0.96 },
 
-  cardPressed: {
-    transform: [{ scale: 0.995 }],
-    opacity: 0.96,
-  },
-
-  // ───────── Capsule card (SOLID, not glass) ─────────
   capsuleCard: {
     borderRadius: 22,
     overflow: "hidden",
@@ -326,16 +366,21 @@ const styles = StyleSheet.create({
     borderColor: "rgba(0,0,0,0.08)",
   },
 
-  coverWrap: {
-    height: 140,
-    position: "relative",
-    backgroundColor: "rgba(0,0,0,0.06)",
+  keyTop: { padding: 12, gap: 12, backgroundColor: "rgba(255,255,255,0.92)" },
+  keyBadgesRow: { flexDirection: "row", justifyContent: "space-between", gap: 10 },
+  qrWrap: { alignItems: "center", gap: 8, paddingBottom: 6 },
+  qrCard: {
+    padding: 12,
+    borderRadius: 18,
+    backgroundColor: "#fff",
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
   },
+  qrHint: { opacity: 0.75, fontSize: 12, textAlign: "center" },
+
+  coverWrap: { height: 140, position: "relative", backgroundColor: "rgba(0,0,0,0.06)" },
   coverImg: { width: "100%", height: "100%" },
-  coverShade: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(0,0,0,0.14)",
-  },
+  coverShade: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.14)" },
   coverBadges: {
     position: "absolute",
     left: 12,
@@ -354,21 +399,10 @@ const styles = StyleSheet.create({
     gap: 10,
   },
 
-  capsuleBody: {
-    padding: 14,
-    gap: 8,
-  },
+  capsuleBody: { padding: 14, gap: 8 },
 
-  cardTitle: {
-    fontSize: 18,
-    fontFamily: Fonts.rounded,
-    color: "#1b1b1b",
-  },
-  cardDesc: {
-    opacity: 0.8,
-    color: "#1b1b1b",
-    lineHeight: 19,
-  },
+  cardTitle: { fontSize: 18, fontFamily: Fonts.rounded, color: "#1b1b1b" },
+  cardDesc: { opacity: 0.8, color: "#1b1b1b", lineHeight: 19 },
 
   metaRow: {
     marginTop: 2,
@@ -387,43 +421,15 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(210, 140, 80, 0.45)",
   },
-  openBtnText: {
-    fontFamily: Fonts.rounded,
-    fontSize: 13,
-    color: "#1b1b1b",
-  },
+  openBtnText: { fontFamily: Fonts.rounded, fontSize: 13, color: "#1b1b1b" },
 
-  // Badges
-  badge: {
-    paddingVertical: 7,
-    paddingHorizontal: 12,
-    borderRadius: 999,
-    borderWidth: 1,
-  },
-  badgeText: {
-    fontFamily: Fonts.rounded,
-    fontSize: 12,
-    opacity: 0.92,
-    color: "#1b1b1b",
-  },
-  badgeNeutral: {
-    backgroundColor: "rgba(255,255,255,0.92)",
-    borderColor: "rgba(0,0,0,0.08)",
-  },
-  badgeOpen: {
-    backgroundColor: "rgba(215, 255, 230, 0.92)",
-    borderColor: "rgba(0,0,0,0.08)",
-  },
-  badgeLocked: {
-    backgroundColor: "rgba(255, 235, 205, 0.92)",
-    borderColor: "rgba(0,0,0,0.08)",
-  },
-  badgeArchived: {
-    backgroundColor: "rgba(235, 235, 245, 0.92)",
-    borderColor: "rgba(0,0,0,0.08)",
-  },
+  badge: { paddingVertical: 7, paddingHorizontal: 12, borderRadius: 999, borderWidth: 1 },
+  badgeText: { fontFamily: Fonts.rounded, fontSize: 12, opacity: 0.92, color: "#1b1b1b" },
+  badgeNeutral: { backgroundColor: "rgba(255,255,255,0.92)", borderColor: "rgba(0,0,0,0.08)" },
+  badgeOpen: { backgroundColor: "rgba(215, 255, 230, 0.92)", borderColor: "rgba(0,0,0,0.08)" },
+  badgeLocked: { backgroundColor: "rgba(255, 235, 205, 0.92)", borderColor: "rgba(0,0,0,0.08)" },
+  badgeArchived: { backgroundColor: "rgba(235, 235, 245, 0.92)", borderColor: "rgba(0,0,0,0.08)" },
 
-  // ───────── Post card (clean) ─────────
   postCard: {
     borderRadius: 22,
     padding: 14,
@@ -432,19 +438,10 @@ const styles = StyleSheet.create({
     borderColor: "rgba(0,0,0,0.08)",
     gap: 10,
   },
-
-  postHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "baseline",
-    gap: 12,
-  },
-
+  postHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "baseline", gap: 12 },
   postAuthor: { fontFamily: Fonts.rounded, fontSize: 16, color: "#111" },
   postDate: { fontSize: 12, opacity: 0.65, color: "#111" },
-
   postText: { fontSize: 16, color: "#111", lineHeight: 20 },
-
   postImgWrap: {
     borderRadius: 18,
     overflow: "hidden",
@@ -454,7 +451,6 @@ const styles = StyleSheet.create({
   },
   postImg: { width: "100%", height: 240 },
 
-  // Error box
   errorBox: {
     marginTop: 18,
     padding: 16,
