@@ -4,10 +4,9 @@ const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
 const rateLimit = require("express-rate-limit");
+const path = require("path");
+
 const { connectDB, sequelize } = require("./config/db");
-
-
-
 
 // modelele trebuie importate ca să înregistreze asocierile
 const User = require("./models/User");
@@ -20,6 +19,8 @@ require("./models/CapsuleKey");
 require("./models/CapsuleAccess");
 
 const app = express();
+
+// IMPORTANT pt ngrok / reverse proxy (x-forwarded-proto, etc.)
 app.set("trust proxy", 1);
 
 // ── Middleware de bază
@@ -28,7 +29,8 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use(
   cors({
-    origin: process.env.CORS_ORIGIN || "*", // fallback dacă nu e setat în .env
+    origin: process.env.CORS_ORIGIN || "*",
+    credentials: true,
   })
 );
 
@@ -37,10 +39,14 @@ app.use(morgan("dev"));
 
 app.use(
   rateLimit({
-    windowMs: 60_000, // 1 minut
-    max: 100, // max 100 request-uri/minut/ip
+    windowMs: 60_000,
+    max: 200,
   })
 );
+
+
+// ✅ Servește fișierele încărcate (din backend/uploads)
+app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
 
 // Healthcheck
 app.get("/", (_req, res) => res.send("✅ Unfold API (SQL Server) is running"));
@@ -50,8 +56,10 @@ app.use("/auth", require("./routes/auth.routes"));
 app.use("/content", require("./routes/content.routes"));
 app.use("/capsules", require("./routes/capsules.routes"));
 
+// ✅ Upload route (trebuie să existe backend/src/routes/upload.routes.js)
+app.use("/upload", require("./routes/upload.routes"));
 
-// Handler global erori (trebuie să fie după rute)
+// Handler global erori (după rute)
 app.use(require("./middlewares/error"));
 
 // ── Bootstrap aplicație
@@ -59,14 +67,11 @@ app.use(require("./middlewares/error"));
   try {
     await connectDB();
 
-    // ⚠️ DEV: sincronizează schema DB cu modelele (adaugă coloane lipsă etc.)
-    // După ce totul e stabil, poți reveni la: await sequelize.sync();
     await sequelize.sync();
     console.log("📊 Tables synchronized");
 
-
     const PORT = process.env.PORT || 4000;
-    app.listen(PORT, () => {
+    app.listen(PORT, "0.0.0.0", () => {
       console.log(`🚀 Server running on http://localhost:${PORT}`);
     });
   } catch (err) {
