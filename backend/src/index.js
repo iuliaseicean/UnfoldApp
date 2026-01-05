@@ -15,6 +15,8 @@ require("./models/Capsule");
 require("./models/CapsuleContribution");
 require("./models/CapsuleKey");
 require("./models/CapsuleAccess");
+require("./models/PostLike");
+require("./models/PostComment");
 
 const app = express();
 
@@ -24,6 +26,10 @@ app.set("trust proxy", 1);
 // ── Middleware de bază
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
+
+// (dacă nu folosești încă routes astea, le poți comenta)
+// app.use("/users", require("./routes/users.routes"));
+// app.use("/feed", require("./routes/feed.routes"));
 
 app.use(
   cors({
@@ -65,16 +71,6 @@ app.use(require("./middlewares/error"));
   try {
     await connectDB();
 
-    /**
-     * ⚠ IMPORTANT:
-     * NU apelăm sequelize.sync() aici.
-     * Fără acces la DB/SSMS, sync poate crăpa dacă modelele au coloane
-     * care nu există în DB (ex: qr_url), sau dacă userul DB nu are permisiuni.
-     *
-     * Dacă vreți sync doar local/dev când ai DB la tine:
-     * setezi în .env: DB_SYNC=true
-     * și pornești doar atunci.
-     */
     if (String(process.env.DB_SYNC || "").toLowerCase() === "true") {
       await sequelize.sync();
       console.log("📊 Tables synchronized (DB_SYNC=true)");
@@ -83,8 +79,11 @@ app.use(require("./middlewares/error"));
     }
 
     const PORT = process.env.PORT || 4000;
+
+    // ✅ ascultă pe toate interfețele (telefonul poate accesa via IP)
     app.listen(PORT, "0.0.0.0", () => {
-      console.log(`🚀 Server running on http://localhost:${PORT}`);
+      const appUrl = process.env.APP_URL || `http://<YOUR_LAN_IP>:${PORT}`;
+      console.log(`🚀 Server listening on ${appUrl}`);
     });
   } catch (err) {
     console.error("❌ Fatal startup error:", err);

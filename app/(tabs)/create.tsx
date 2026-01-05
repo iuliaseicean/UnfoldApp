@@ -50,6 +50,15 @@ function guessMimeType(uri: string) {
   return "image/jpeg";
 }
 
+// compat: scapă de warning-ul MediaTypeOptions (dar nu crăpăm dacă SDK-ul are types mai vechi)
+function getImagePickerMediaTypes(): any {
+  const anyPicker: any = ImagePicker as any;
+  // nou: mediaTypes: [ImagePicker.MediaType.Images]
+  if (anyPicker?.MediaType?.Images) return [anyPicker.MediaType.Images];
+  // vechi: mediaTypes: ImagePicker.MediaTypeOptions.Images
+  return anyPicker?.MediaTypeOptions?.Images;
+}
+
 export default function CreateScreen() {
   const [mode, setMode] = useState<CreateMode>("time");
 
@@ -66,8 +75,8 @@ export default function CreateScreen() {
 
   // Key Caps
   const [keyExpiresAt, setKeyExpiresAt] = useState("");
-  const [keyPlain, setKeyPlain] = useState(""); // ✅ parola/cheia aleasă de creator
-  const [keyPlain2, setKeyPlain2] = useState(""); // ✅ confirmare
+  const [keyPlain, setKeyPlain] = useState("");
+  const [keyPlain2, setKeyPlain2] = useState("");
 
   // Post normal
   const [postText, setPostText] = useState("");
@@ -105,9 +114,7 @@ export default function CreateScreen() {
     setKeyPlain2("");
   };
 
-  const resetPostForm = () => {
-    setPostText("");
-  };
+  const resetPostForm = () => setPostText("");
 
   const resetMedia = () => {
     setLocalImageUri(null);
@@ -121,9 +128,7 @@ export default function CreateScreen() {
     });
   };
 
-  // ─────────────────────────────────────────────
   // 1) Pick / Camera
-  // ─────────────────────────────────────────────
   const pickFromGallery = async () => {
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!perm.granted) {
@@ -132,7 +137,7 @@ export default function CreateScreen() {
     }
 
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: getImagePickerMediaTypes(),
       quality: 0.85,
     });
 
@@ -163,32 +168,30 @@ export default function CreateScreen() {
     }
   };
 
-  // ─────────────────────────────────────────────
-  // 2) Upload la backend → primești URL
-  // ✅ Endpoint-ul tău este /upload/image
-  // ─────────────────────────────────────────────
-  const uploadSelectedImage = async () => {
+  // 2) Upload la backend → return URL
+  const uploadSelectedImage = async (): Promise<string> => {
     if (!localImageUri) {
-      Alert.alert("Nu ai selectat poză", "Alege o poză din galerie sau fă una cu camera.");
-      return;
+      throw new Error("Nu ai selectat poză.");
     }
-    if (uploading) return;
+    if (uploading) {
+      // dacă deja e uploaded în state, îl returnăm
+      if (uploadedImageUrl) return uploadedImageUrl;
+      throw new Error("Upload în desfășurare...");
+    }
 
+    setUploading(true);
     try {
-      setUploading(true);
-
       const filename = getFilenameFromUri(localImageUri);
       const mime = guessMimeType(localImageUri);
 
       const form = new FormData();
-      // @ts-ignore - RN FormData file type
+      // @ts-ignore
       form.append("file", {
         uri: localImageUri,
         name: filename,
         type: mime,
       });
 
-      // ✅ corect: /upload/image
       const res = await api.post("/upload/image", form, {
         headers: { "Content-Type": "multipart/form-data" },
       });
@@ -197,23 +200,18 @@ export default function CreateScreen() {
       if (!url) throw new Error("Upload ok, dar serverul nu a returnat URL.");
 
       setUploadedImageUrl(url);
-      Alert.alert("Succes", "Imaginea a fost încărcată!");
-    } catch (e: any) {
-      const msg = e?.response?.data?.message || e?.message || "Nu am putut încărca imaginea.";
-      Alert.alert("Eroare upload", msg);
+      return url;
     } finally {
       setUploading(false);
     }
   };
 
-  // ─────────────────────────────────────────────
-  // 3) Create Post
-  // ─────────────────────────────────────────────
-  const handleCreatePost = async () => {
+  // 3) Create Post (primește media_url direct)
+  const handleCreatePost = async (mediaUrl: string | null) => {
     if (loading) return;
 
     const text = postText.trim();
-    const media_url = uploadedImageUrl || null;
+    const media_url = mediaUrl;
 
     if (!text && !media_url) {
       Alert.alert("Lipsește conținutul", "Scrie un text sau încarcă o poză.");
@@ -224,7 +222,7 @@ export default function CreateScreen() {
       setLoading(true);
 
       await api.post("/content/posts", {
-        content_text: text || null,
+        content_text: text || "",
         media_url,
         visibility: "public",
       });
@@ -241,10 +239,8 @@ export default function CreateScreen() {
     }
   };
 
-  // ─────────────────────────────────────────────
   // 4) Create Capsule
-  // ─────────────────────────────────────────────
-  const handleCreateCapsule = async () => {
+  const handleCreateCapsule = async (mediaUrl: string | null) => {
     if (loading) return;
 
     const cleanTitle = title.trim();
@@ -255,9 +251,8 @@ export default function CreateScreen() {
       return;
     }
 
-    // ✅ pentru key: ai nevoie de poză + cheie
     if (mode === "key") {
-      if (!uploadedImageUrl) {
+      if (!mediaUrl) {
         Alert.alert("Lipsește poza", "Pentru Key Caps trebuie să încarci o poză (Upload).");
         return;
       }
@@ -271,21 +266,18 @@ export default function CreateScreen() {
       }
     }
 
-    let payload: any = {
+    const payload: any = {
       title: cleanTitle,
       description: cleanDesc || null,
       capsule_type: mode === "contributors" ? "co" : mode,
-      cover_url: uploadedImageUrl || null,
-      media_url: uploadedImageUrl || null,
+      cover_url: mediaUrl || null,
+      media_url: mediaUrl || null,
     };
 
     if (mode === "time") {
       const iso = normalizeIsoDate(openAt);
       if (!iso) {
-        Alert.alert(
-          "Lipsește data",
-          'Pentru Time Capsule completează "Open at" (ex: 2025-12-31 18:30).'
-        );
+        Alert.alert("Lipsește data", 'Pentru Time Capsule completează "Open at" (ex: 2025-12-31 18:30).');
         return;
       }
       payload.open_at = iso;
@@ -310,8 +302,6 @@ export default function CreateScreen() {
     if (mode === "key") {
       const exp = normalizeIsoDate(keyExpiresAt);
       if (exp) payload.key_expires_at = exp;
-
-      // ✅ CHEIE trimisă la backend (exact cum am pus în route: key_plain)
       payload.key_plain = keyPlain.trim();
     }
 
@@ -320,8 +310,7 @@ export default function CreateScreen() {
 
       const res = await api.post("/capsules", payload);
 
-      const capsuleId: number =
-        res?.data?.capsule_id ?? res?.data?.id ?? res?.data?.capsule?.capsule_id;
+      const capsuleId: number = res?.data?.capsule_id ?? res?.data?.id ?? res?.data?.capsule?.capsule_id;
 
       Alert.alert("Succes", mode === "key" ? "Key capsule + QR creată!" : "Capsula a fost creată!");
       resetCapsuleForm();
@@ -338,30 +327,29 @@ export default function CreateScreen() {
   };
 
   const handleCreate = async () => {
-    if (mode === "post") return handleCreatePost();
-    return handleCreateCapsule();
-  };
+    // dacă există poză locală dar nu e uploaded, upload și ia URL-ul direct
+    let mediaUrl: string | null = uploadedImageUrl;
 
-  const ensureUploadedIfNeeded = async () => {
-    if (localImageUri && !uploadedImageUrl) {
-      await uploadSelectedImage();
+    try {
+      if (localImageUri && !uploadedImageUrl) {
+        mediaUrl = await uploadSelectedImage();
+      }
+    } catch (e: any) {
+      Alert.alert("Eroare upload", e?.message || "Nu am putut încărca imaginea.");
+      return;
     }
+
+    if (mode === "post") return handleCreatePost(mediaUrl);
+    return handleCreateCapsule(mediaUrl);
   };
 
-  const photoHint = uploadedImageUrl
-    ? "Uploaded ✓"
-    : localImageUri
-    ? "Selected • tap Upload"
-    : "Optional";
+  const photoHint = uploadedImageUrl ? "Uploaded ✓" : localImageUri ? "Selected • tap Upload" : "Optional";
 
   return (
     <ImageBackground source={BG} style={styles.bg} resizeMode="cover">
       <View style={styles.bgOverlay} />
 
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.select({ ios: "padding", android: undefined })}
-      >
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.select({ ios: "padding", android: undefined })}>
         <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
           <View style={styles.header}>
             <ThemedText type="title" style={styles.title}>
@@ -371,7 +359,6 @@ export default function CreateScreen() {
           </View>
 
           <ThemedView style={styles.card}>
-            {/* Pills */}
             <View style={styles.pillsRow}>
               <Pill label="Post" active={mode === "post"} onPress={() => setMode("post")} />
               <Pill label="Time" active={mode === "time"} onPress={() => setMode("time")} />
@@ -379,16 +366,10 @@ export default function CreateScreen() {
               <Pill label="Key" active={mode === "key"} onPress={() => setMode("key")} />
             </View>
 
-            {/* Photo */}
             <ThemedView style={styles.photoCard}>
               <View style={styles.photoHeaderRow}>
                 <ThemedText style={styles.photoTitle}>Photo</ThemedText>
-                <View
-                  style={[
-                    styles.photoPill,
-                    uploadedImageUrl ? styles.photoPillOk : localImageUri ? styles.photoPillWarn : null,
-                  ]}
-                >
+                <View style={[styles.photoPill, uploadedImageUrl ? styles.photoPillOk : localImageUri ? styles.photoPillWarn : null]}>
                   <ThemedText style={styles.photoPillText}>{photoHint}</ThemedText>
                 </View>
               </View>
@@ -398,7 +379,15 @@ export default function CreateScreen() {
                 <SmallBtn label="Camera" onPress={takePhoto} />
                 <SmallBtn
                   label={uploading ? "Uploading..." : uploadedImageUrl ? "Uploaded" : "Upload"}
-                  onPress={uploadSelectedImage}
+                  onPress={async () => {
+                    try {
+                      const url = await uploadSelectedImage();
+                      Alert.alert("Succes", "Imaginea a fost încărcată!");
+                      setUploadedImageUrl(url);
+                    } catch (e: any) {
+                      Alert.alert("Eroare upload", e?.message || "Nu am putut încărca imaginea.");
+                    }
+                  }}
                   disabled={!localImageUri || uploading}
                   tone={!localImageUri ? "muted" : uploadedImageUrl ? "success" : "primary"}
                 />
@@ -418,7 +407,6 @@ export default function CreateScreen() {
               )}
             </ThemedView>
 
-            {/* CONTENT */}
             {mode === "post" ? (
               <ThemedView style={styles.section}>
                 <ThemedText style={styles.sectionTitle}>Postare normală</ThemedText>
@@ -433,17 +421,8 @@ export default function CreateScreen() {
                   multiline
                 />
 
-                <Pressable
-                  style={[styles.primaryBtn, (loading || uploading) && styles.disabledBtn]}
-                  onPress={async () => {
-                    await ensureUploadedIfNeeded();
-                    await handleCreate();
-                  }}
-                  disabled={loading || uploading}
-                >
-                  <ThemedText style={styles.primaryBtnText}>
-                    {loading ? "Creating..." : "Create post"}
-                  </ThemedText>
+                <Pressable style={[styles.primaryBtn, (loading || uploading) && styles.disabledBtn]} onPress={handleCreate} disabled={loading || uploading}>
+                  <ThemedText style={styles.primaryBtnText}>{loading ? "Creating..." : "Create post"}</ThemedText>
                 </Pressable>
               </ThemedView>
             ) : (
@@ -553,40 +532,21 @@ export default function CreateScreen() {
                   </ThemedView>
                 )}
 
-                <Pressable
-                  style={[styles.primaryBtn, (loading || uploading) && styles.disabledBtn]}
-                  onPress={async () => {
-                    await ensureUploadedIfNeeded();
-                    await handleCreate();
-                  }}
-                  disabled={loading || uploading}
-                >
-                  <ThemedText style={styles.primaryBtnText}>
-                    {loading ? "Creating..." : "Create capsule"}
-                  </ThemedText>
+                <Pressable style={[styles.primaryBtn, (loading || uploading) && styles.disabledBtn]} onPress={handleCreate} disabled={loading || uploading}>
+                  <ThemedText style={styles.primaryBtnText}>{loading ? "Creating..." : "Create capsule"}</ThemedText>
                 </Pressable>
               </>
             )}
           </ThemedView>
 
-          <ThemedText style={styles.footerHint}>
-            Backend-ul trebuie să fie pornit + ngrok (dacă testezi pe telefon).
-          </ThemedText>
+          <ThemedText style={styles.footerHint}>Backend-ul trebuie să fie pornit (și accesibil din telefon).</ThemedText>
         </ScrollView>
       </KeyboardAvoidingView>
     </ImageBackground>
   );
 }
 
-function Pill({
-  label,
-  active,
-  onPress,
-}: {
-  label: string;
-  active: boolean;
-  onPress: () => void;
-}) {
+function Pill({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
   return (
     <Pressable onPress={onPress} style={[styles.pill, active ? styles.pillActive : styles.pillInactive]}>
       <ThemedText style={[styles.pillText, active && styles.pillTextActive]}>{label}</ThemedText>

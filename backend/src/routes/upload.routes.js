@@ -28,16 +28,24 @@ const upload = multer({
   limits: { fileSize: 8 * 1024 * 1024 }, // 8MB
 });
 
+// ✅ IMPORTANT: pentru telefon (Expo Go), NU folosi host=localhost
+// Folosim APP_URL dacă există, ex: http://192.168.100.3:4000
 function buildPublicUrl(req, filename) {
-  const host = req.get("host"); // ex: localhost:4000 sau domeniu ngrok
-  const proto = req.headers["x-forwarded-proto"] || req.protocol; // pt ngrok/proxy
+  const appUrl = String(process.env.APP_URL || "").trim().replace(/\/+$/, "");
+  if (appUrl) return `${appUrl}/uploads/${filename}`;
+
+  // fallback (ngrok / proxy)
+  const host = req.get("host");
+  const proto = req.headers["x-forwarded-proto"] || req.protocol;
   return `${proto}://${host}/uploads/${filename}`;
 }
 
 async function handleUpload(req, res, next) {
   try {
     if (!req.file) {
-      return res.status(400).json({ message: "No file uploaded (field name must be 'file')" });
+      return res
+        .status(400)
+        .json({ message: "No file uploaded (field name must be 'file')" });
     }
 
     const url = buildPublicUrl(req, req.file.filename);
@@ -47,7 +55,7 @@ async function handleUpload(req, res, next) {
   }
 }
 
-// ✅ suportă ambele: /upload și /upload/image (ca să nu mai ai 404)
+// ✅ suportă ambele: /upload și /upload/image
 router.post("/", auth, upload.single("file"), handleUpload);
 router.post("/image", auth, upload.single("file"), handleUpload);
 
