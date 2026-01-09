@@ -19,6 +19,13 @@ const {
 } = require("../services/capsule.service");
 
 /**
+ * Helpers
+ */
+function hasAttr(model, name) {
+  return !!model?.rawAttributes?.[name];
+}
+
+/**
  * APP_URL pentru payload QR (NU îl salvăm în DB)
  * Pune în backend/.env:
  * APP_URL=https://xxxx.ngrok-free.app
@@ -117,6 +124,96 @@ async function enrichWithKeyMeta(req, capsules) {
   });
 }
 
+/**
+ * ✅ Enrich pentru CO meta:
+ * - contributorsCount (unique users)
+ * - isFull
+ * - canContribute (user nu a contribuit încă, capsula nu e full, nu e archived)
+ */
+async function enrichWithCoMeta(capsules, userId) {
+  const arr = Array.isArray(capsules) ? capsules : [];
+  const coCaps = arr.filter((c) => (c?.capsule_type ?? c?.toJSON?.()?.capsule_type) === "co");
+
+  if (!coCaps.length) {
+    return arr.map((c) => ({
+      ...(typeof c?.toJSON === "function" ? c.toJSON() : c),
+      contributorsCount: null,
+      isFull: null,
+      canContribute: null,
+    }));
+  }
+
+  const coIds = coCaps
+    .map((c) => (typeof c?.toJSON === "function" ? c.toJSON().capsule_id : c.capsule_id))
+    .filter(Boolean);
+
+  // 1) contributorsCount per capsule (unique contributors)
+  const counts = new Map();
+  for (const id of coIds) {
+    const cnt = await getUniqueContributorsCount(id);
+    counts.set(id, Number(cnt || 0));
+  }
+
+  // 2) userAlreadyContributed map
+  let contributedSet = new Set();
+  if (userId && coIds.length) {
+    const rows = await CapsuleContribution.findAll({
+      where: { capsule_id: coIds, user_id: userId },
+      attributes: ["capsule_id"],
+      raw: true,
+    });
+    contributedSet = new Set(rows.map((r) => Number(r.capsule_id)));
+  }
+
+  return arr.map((c) => {
+    const row = typeof c?.toJSON === "function" ? c.toJSON() : c;
+
+    if (row.capsule_type !== "co") {
+      return { ...row, contributorsCount: null, isFull: null, canContribute: null };
+    }
+
+    const required = Number(row.required_contributors || 0);
+    const cnt = Number(counts.get(Number(row.capsule_id)) || 0);
+
+    const isFull = required > 0 ? cnt >= required : false;
+    const already = contributedSet.has(Number(row.capsule_id));
+
+    const canContribute =
+      !already &&
+      !isFull &&
+      row.status !== "archived" &&
+      // dacă vrei să blochezi contribuțiile după open, schimbă aici:
+      row.status !== "open";
+
+    return {
+      ...row,
+      contributorsCount: cnt,
+      isFull,
+      canContribute,
+    };
+  });
+}
+
+/**
+ * Helper: aplică refresh + filtre + enrich
+ */
+async function prepareListForUser(req, list, userId) {
+  // refresh status
+  for (const c of list) await refreshCapsuleStatus(c);
+
+  // filtrează capsulele pe care userul are voie să le vadă
+  const allowed = [];
+  for (const c of list) {
+    const ok = await canUserViewCapsule(c, userId);
+    if (ok) allowed.push(c);
+  }
+
+  // enrich meta
+  const withKey = await enrichWithKeyMeta(req, allowed);
+  const withCo = await enrichWithCoMeta(withKey, userId);
+  return withCo;
+}
+
 // ─────────────────────────────────────────────
 // IMPORTANT: rutele "statice" (ex: /search, /my) trebuie
 // să fie ÎNAINTE de "/:id" ca să nu intre în conflict.
@@ -148,17 +245,7 @@ router.get("/search", auth, async (req, res, next) => {
       limit: 50,
     });
 
-    // refresh status
-    for (const c of list) await refreshCapsuleStatus(c);
-
-    // filtrează capsulele pe care userul are voie să le vadă
-    const allowed = [];
-    for (const c of list) {
-      const ok = await canUserViewCapsule(c, userId);
-      if (ok) allowed.push(c);
-    }
-
-    const enriched = await enrichWithKeyMeta(req, allowed);
+    const enriched = await prepareListForUser(req, list, userId);
     return res.json(enriched);
   } catch (e) {
     next(e);
@@ -179,9 +266,12 @@ router.post("/", auth, async (req, res, next) => {
       visibility_duration = null,
       required_contributors = null,
 
+      // media / cover (trimise de app)
+      cover_url = null,
+      media_url = null,
+
       // KEY only:
       key_plain = null,
-      media_url = null,
       key_expires_at = null,
     } = req.body || {};
 
@@ -202,7 +292,9 @@ router.post("/", auth, async (req, res, next) => {
         return res.status(400).json({ error: "key_plain is required for key capsules" });
       }
       if (!media_url || !String(media_url).trim()) {
-        return res.status(400).json({ error: "media_url (image url) is required for key capsules" });
+        return res
+          .status(400)
+          .json({ error: "media_url (image url) is required for key capsules" });
       }
     }
 
@@ -218,9 +310,27 @@ router.post("/", auth, async (req, res, next) => {
       visibility_duration: visibility_duration != null ? Number(visibility_duration) : null,
       required_contributors: required_contributors != null ? Number(required_contributors) : null,
       status: "locked",
+
+      // ✅ dacă modelul are cover_url/media_url, le salvăm
+      cover_url: cover_url || media_url || null,
+      media_url: media_url || cover_url || null,
     });
 
     const created = await Capsule.create(capsulePayload);
+
+    // ✅ pentru CO: creatorul devine primul contributor (poza de cover devine contribuția lui)
+    if (capsule_type === "co") {
+      const firstMedia = String(media_url || cover_url || "").trim() || null;
+
+      if (firstMedia) {
+        await CapsuleContribution.create({
+          capsule_id: created.capsule_id,
+          user_id: userId,
+          content_text: null,
+          media_url: firstMedia,
+        });
+      }
+    }
 
     if (capsule_type === "key") {
       const expiresAt = key_expires_at ? new Date(key_expires_at) : null;
@@ -245,6 +355,12 @@ router.post("/", auth, async (req, res, next) => {
       });
     }
 
+    // ✅ return co meta și la create (ca să vezi imediat progresul)
+    if (capsule_type === "co") {
+      const enriched = await enrichWithCoMeta([created], userId);
+      return res.status(201).json(enriched[0]);
+    }
+
     return res.status(201).json(created);
   } catch (e) {
     next(e);
@@ -265,9 +381,7 @@ router.get("/my", auth, async (req, res, next) => {
       order: orderByCreated(Capsule, "DESC"),
     });
 
-    for (const c of list) await refreshCapsuleStatus(c);
-
-    const enriched = await enrichWithKeyMeta(req, list);
+    const enriched = await prepareListForUser(req, list, userId);
     return res.json(enriched);
   } catch (e) {
     next(e);
@@ -280,14 +394,17 @@ router.get("/my", auth, async (req, res, next) => {
 // ─────────────────────────────────────────────
 router.get("/", auth, async (req, res, next) => {
   try {
+    const userId = getAuthUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const limit = Math.min(Math.max(Number(req.query.limit || 100), 1), 200);
+
     const list = await Capsule.findAll({
       order: orderByCreated(Capsule, "DESC"),
-      limit: 100,
+      limit,
     });
 
-    for (const c of list) await refreshCapsuleStatus(c);
-
-    const enriched = await enrichWithKeyMeta(req, list);
+    const enriched = await prepareListForUser(req, list, userId);
     return res.json(enriched);
   } catch (e) {
     next(e);
@@ -345,11 +462,25 @@ router.get("/:id", auth, async (req, res, next) => {
       };
     }
 
+    // ✅ CO meta și pe details
+    let coMeta = null;
+    if (capsule.capsule_type === "co") {
+      const enriched = await enrichWithCoMeta([capsule], userId);
+      const row = enriched[0];
+      coMeta = {
+        contributorsCount: row.contributorsCount ?? 0,
+        isFull: !!row.isFull,
+        canContribute: !!row.canContribute,
+        required_contributors: capsule.required_contributors ?? null,
+      };
+    }
+
     return res.json({
       capsule,
       contributions,
       uniqueContributors,
       key: keyMeta,
+      co: coMeta,
     });
   } catch (e) {
     next(e);
@@ -418,6 +549,22 @@ router.post("/:id/contributions", auth, async (req, res, next) => {
 
     const allowed = await canUserViewCapsule(capsule, userId);
     if (!allowed) return res.status(403).json({ error: "No access to this capsule" });
+
+    // ✅ CO rules: dacă e co și e full sau user a contribuit deja -> blocăm
+    if (capsule.capsule_type === "co") {
+      const required = Number(capsule.required_contributors || 0);
+      const cnt = await getUniqueContributorsCount(capsule.capsule_id);
+      if (required > 0 && Number(cnt || 0) >= required) {
+        return res.status(409).json({ error: "Co-Caps is already full" });
+      }
+
+      const existing = await CapsuleContribution.findOne({
+        where: { capsule_id: capsule.capsule_id, user_id: userId },
+      });
+      if (existing) {
+        return res.status(409).json({ error: "You already contributed to this Co-Caps" });
+      }
+    }
 
     const { content_text = null, media_url = null } = req.body || {};
     if (!content_text && !media_url) {

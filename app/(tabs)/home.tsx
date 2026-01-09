@@ -1,3 +1,4 @@
+// app/(tabs)/home.tsx
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -37,6 +38,11 @@ type Capsule = {
   cover_url?: string | null;
   media_url?: string | null;
   qr_url?: string | null;
+
+  // ✅ CO meta (normalizate în lib/capsules.ts)
+  contributorsCount?: number | null;
+  isFull?: boolean | null;
+  canContribute?: boolean | null;
 };
 
 type FeedItem =
@@ -70,6 +76,10 @@ function statusPill(status?: string) {
   return { text: status || "Unknown", tone: "default" as const };
 }
 
+function clamp(n: number, a: number, b: number) {
+  return Math.min(Math.max(n, a), b);
+}
+
 export default function HomeScreen() {
   const [capsules, setCapsules] = useState<Capsule[]>([]);
   const [posts, setPosts] = useState<PostItem[]>([]);
@@ -90,7 +100,7 @@ export default function HomeScreen() {
       setLoading(true);
 
       const [caps, pst] = await Promise.all([getCapsules(), getPosts()]);
-      setCapsules(Array.isArray(caps) ? caps : []);
+      setCapsules(Array.isArray(caps) ? (caps as any) : []);
       setPosts(Array.isArray(pst) ? pst : []);
 
       // init liked map only for new posts (NU resetăm ce a apăsat user-ul)
@@ -124,7 +134,17 @@ export default function HomeScreen() {
         return next;
       });
     } catch {
-      // nu blocăm UI, doar ignorăm
+      // ignore
+    }
+  }, []);
+
+  // refresh doar capsule (util după ce contribui la co-cap)
+  const reloadCapsulesOnly = useCallback(async () => {
+    try {
+      const caps = await getCapsules();
+      setCapsules(Array.isArray(caps) ? (caps as any) : []);
+    } catch {
+      // ignore
     }
   }, []);
 
@@ -134,10 +154,11 @@ export default function HomeScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      // evită reload complet la fiecare focus, dar menține feed-ul proaspăt
       if (!didFirstLoad.current) return;
+      // ✅ după contribute la co-cap, când revii în home, vezi progresul
+      reloadCapsulesOnly();
       reloadPostsOnly();
-    }, [reloadPostsOnly])
+    }, [reloadCapsulesOnly, reloadPostsOnly])
   );
 
   const onRefresh = useCallback(async () => {
@@ -168,16 +189,16 @@ export default function HomeScreen() {
 
   const makeKeyDeepLink = (capsuleId: number) => Linking.createURL(`/capsule/key/${capsuleId}`);
 
-  const goToKeyUnlock = (capsuleId: number) => {
-    router.push(`/capsule/key/${capsuleId}` as any);
-  };
+  const goToKeyUnlock = (capsuleId: number) => router.push(`/capsule/key/${capsuleId}` as any);
 
   const openComments = (postId: number) => {
-  router.push({
-    pathname: "/post/[id]",
-    params: { id: String(postId) },
-  } as any);
-};
+    router.push(
+      {
+        pathname: "/post/[id]",
+        params: { id: String(postId) },
+      } as any
+    );
+  };
 
   const onToggleLike = async (postId: number) => {
     if (busyLike[postId]) return;
@@ -215,6 +236,12 @@ export default function HomeScreen() {
     } finally {
       setBusyLike((m) => ({ ...m, [postId]: false }));
     }
+  };
+
+  const goToCoContribute = (capsuleId: number) => {
+    // ✅ ecran dedicat pentru upload & submit
+    // IMPORTANT: trebuie să creezi app/capsule/co/[id].tsx
+    router.push(`/capsule/co/${capsuleId}` as any);
   };
 
   return (
@@ -267,7 +294,22 @@ export default function HomeScreen() {
               const st = statusPill(c.status);
 
               const isKey = c.capsule_type === "key";
+              const isCo = c.capsule_type === "co";
+
+              // cover pentru time/co (poate fi cover_url sau media_url)
               const cover = !isKey ? c.cover_url || c.media_url || null : null;
+
+              // ✅ CO meta
+              const required = Number(c.required_contributors ?? 0) || 0;
+              const contributed = Number(c.contributorsCount ?? 0) || 0;
+              const isFull = !!c.isFull || (required > 0 && contributed >= required);
+
+              // dacă backend nu trimite canContribute, nu arătăm "+" (ca să nu fie bug)
+              const canContribute =
+                isCo && !!c.canContribute && !isFull && c.status !== "archived";
+
+              const progressPct = isCo && required > 0 ? clamp(contributed / required, 0, 1) : 0;
+
               const qrValue = makeKeyDeepLink(c.capsule_id);
 
               return (
@@ -290,19 +332,44 @@ export default function HomeScreen() {
                         <View style={styles.qrCard}>
                           <QRCode value={qrValue} size={140} />
                         </View>
-                        <ThemedText style={styles.qrHint}>
-                          Scanează QR-ul sau apasă „Unlock”
-                        </ThemedText>
+                        <ThemedText style={styles.qrHint}>Scanează QR-ul sau apasă „Unlock”</ThemedText>
                       </View>
                     </View>
                   ) : cover ? (
                     <View style={styles.coverWrap}>
                       <Image source={{ uri: cover }} style={styles.coverImg} />
                       <View style={styles.coverShade} />
+
                       <View style={styles.coverBadges}>
                         <Badge text={type} tone="neutral" />
                         <Badge text={st.text} tone={st.tone} />
                       </View>
+
+                      {/* ✅ CO progress overlay */}
+                      {isCo && required > 0 ? (
+                        <View style={styles.coProgressWrap}>
+                          <View style={styles.coProgressBar}>
+                            <View style={[styles.coProgressFill, { width: `${progressPct * 100}%` }]} />
+                          </View>
+                          <ThemedText style={styles.coProgressText}>
+                            {contributed}/{required} contributors
+                          </ThemedText>
+                        </View>
+                      ) : null}
+
+                      {/* ✅ CO + button */}
+                      {canContribute ? (
+                        <Pressable
+                          onPress={(e) => {
+                            // nu navigăm în capsule details când dai pe +
+                            (e as any)?.stopPropagation?.();
+                            goToCoContribute(c.capsule_id);
+                          }}
+                          style={({ pressed }) => [styles.coPlusBtn, pressed && { opacity: 0.85 }]}
+                        >
+                          <Ionicons name="add" size={20} color="#111" />
+                        </Pressable>
+                      ) : null}
                     </View>
                   ) : (
                     <View style={styles.capsuleTopRow}>
@@ -321,21 +388,30 @@ export default function HomeScreen() {
                     ) : null}
 
                     <View style={styles.metaRow}>
-                      <ThemedText style={styles.metaText}>
-                        Created: {formatDate(c.created_at)}
-                      </ThemedText>
+                      <ThemedText style={styles.metaText}>Created: {formatDate(c.created_at)}</ThemedText>
 
-                      <Pressable
-                        onPress={() => {
-                          if (isKey) return goToKeyUnlock(c.capsule_id);
-                          return router.push(`/capsule/${c.capsule_id}` as any);
-                        }}
-                        style={({ pressed }) => [styles.openBtn, pressed && { opacity: 0.9 }]}
-                      >
-                        <ThemedText style={styles.openBtnText}>
-                          {isKey ? "Unlock" : "Open"}
-                        </ThemedText>
-                      </Pressable>
+                      {isCo && required > 0 ? (
+                        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                          {isFull ? <Badge text="Full" tone="archived" /> : <Badge text={`${contributed}/${required}`} tone="neutral" />}
+
+                          <Pressable
+                            onPress={() => router.push(`/capsule/${c.capsule_id}` as any)}
+                            style={({ pressed }) => [styles.openBtn, pressed && { opacity: 0.9 }]}
+                          >
+                            <ThemedText style={styles.openBtnText}>Open</ThemedText>
+                          </Pressable>
+                        </View>
+                      ) : (
+                        <Pressable
+                          onPress={() => {
+                            if (isKey) return goToKeyUnlock(c.capsule_id);
+                            return router.push(`/capsule/${c.capsule_id}` as any);
+                          }}
+                          style={({ pressed }) => [styles.openBtn, pressed && { opacity: 0.9 }]}
+                        >
+                          <ThemedText style={styles.openBtnText}>{isKey ? "Unlock" : "Open"}</ThemedText>
+                        </Pressable>
+                      )}
                     </View>
                   </View>
                 </Pressable>
@@ -481,6 +557,48 @@ const styles = StyleSheet.create({
     gap: 10,
   },
 
+  // ✅ CO progress overlay
+  coProgressWrap: {
+    position: "absolute",
+    left: 12,
+    right: 12,
+    top: 12,
+    gap: 6,
+  },
+  coProgressBar: {
+    height: 8,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.45)",
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
+  },
+  coProgressFill: {
+    height: "100%",
+    backgroundColor: "rgba(255, 220, 195, 0.95)",
+  },
+  coProgressText: {
+    fontSize: 12,
+    color: "#111",
+    opacity: 0.9,
+    fontFamily: Fonts.rounded,
+  },
+
+  // ✅ CO plus button
+  coPlusBtn: {
+    position: "absolute",
+    right: 12,
+    top: 46,
+    width: 42,
+    height: 42,
+    borderRadius: 999,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.92)",
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.10)",
+  },
+
   capsuleTopRow: {
     padding: 12,
     paddingBottom: 0,
@@ -528,7 +646,12 @@ const styles = StyleSheet.create({
     borderColor: "rgba(0,0,0,0.08)",
     gap: 10,
   },
-  postHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "baseline", gap: 12 },
+  postHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "baseline",
+    gap: 12,
+  },
   postAuthor: { fontFamily: Fonts.rounded, fontSize: 16, color: "#111" },
   postDate: { fontSize: 12, opacity: 0.65, color: "#111" },
   postText: { fontSize: 16, color: "#111", lineHeight: 20 },

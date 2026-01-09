@@ -1,67 +1,147 @@
-import { useEffect, useState, useCallback } from "react";
+// app/capsule/[id].tsx
+import { useEffect, useMemo, useState, useCallback } from "react";
 import {
   ScrollView,
   RefreshControl,
   StyleSheet,
   ImageBackground,
   ActivityIndicator,
+  View,
+  Image,
+  Pressable,
+  Alert,
 } from "react-native";
-import { useLocalSearchParams } from "expo-router";
+import { useLocalSearchParams, router } from "expo-router";
+import Ionicons from "@expo/vector-icons/Ionicons";
 
-import { getCapsuleById } from "../../lib/capsules";
-import { Capsule } from "../../types/capsule";
+import { getCapsuleById } from "@/lib/capsules";
+import type { Capsule } from "@/types/capsule";
 import { ThemedText } from "@/components/themed-text";
 import { ThemedView } from "@/components/themed-view";
 
 const BG = require("@/assets/images/brown-metallic-foil-background-texture-free-photo.jpg");
 
+type CapsuleContribution = {
+  id?: number;
+  capsule_id: number;
+  user_id: number;
+  content_text: string | null;
+  media_url: string | null;
+  created_at?: string;
+  User?: {
+    id?: number;
+    user_id?: number;
+    username?: string;
+    email?: string;
+    name?: string;
+    avatar_url?: string | null;
+  };
+};
+
+type CoMeta = {
+  contributorsCount: number;
+  isFull: boolean;
+  canContribute: boolean;
+  required_contributors: number | null;
+};
+
 export default function CapsuleDetails() {
   const { id } = useLocalSearchParams<{ id: string }>();
+  const capsuleId = Number(id);
 
   const [capsule, setCapsule] = useState<Capsule | null>(null);
-  const [contributions, setContributions] = useState<any[]>([]);
+  const [contributions, setContributions] = useState<CapsuleContribution[]>([]);
+  const [co, setCo] = useState<CoMeta | null>(null);
+
   const [loading, setLoading] = useState(true);
 
   const loadCapsule = useCallback(async () => {
-    if (!id) return;
+    if (!capsuleId) return;
     setLoading(true);
     try {
-      const data = await getCapsuleById(Number(id));
-      setCapsule(data.capsule ?? null);
-      setContributions(data.contributions ?? []);
-    } catch {
+      const data: any = await getCapsuleById(capsuleId);
+
+      setCapsule(data?.capsule ?? null);
+      setContributions(Array.isArray(data?.contributions) ? data.contributions : []);
+      setCo(data?.co ?? null);
+    } catch (e: any) {
       setCapsule(null);
       setContributions([]);
+      setCo(null);
     } finally {
       setLoading(false);
     }
-  }, [id]);
+  }, [capsuleId]);
 
   useEffect(() => {
     loadCapsule();
   }, [loadCapsule]);
 
+  const isCo = (capsule?.capsule_type as string) === "co";
+
+  const coverUrl = useMemo(() => {
+    const anyCapsule: any = capsule as any;
+    return anyCapsule?.cover_url || anyCapsule?.media_url || null;
+  }, [capsule]);
+
+  const imageContribs = useMemo(
+    () => contributions.filter((c) => !!c?.media_url),
+    [contributions]
+  );
+
+  const canContribute = useMemo(() => {
+    if (!isCo) return false;
+    if (!co) return false;
+    return !!co.canContribute;
+  }, [isCo, co]);
+
+  const progressLabel = useMemo(() => {
+    if (!isCo) return null;
+    const req = Number((capsule as any)?.required_contributors ?? co?.required_contributors ?? 0) || 0;
+    const cnt = Number(co?.contributorsCount ?? 0) || 0;
+    if (!req) return `Contributors: ${cnt}`;
+    return `Contributors: ${cnt}/${req}`;
+  }, [isCo, capsule, co]);
+
+  const openCoContribute = () => {
+    if (!capsuleId) return;
+    router.push({
+      pathname: "/capsule/co/[id]",
+      params: { id: String(capsuleId) },
+    } as any);
+  };
+
   return (
     <ImageBackground source={BG} style={{ flex: 1 }}>
+      {/* Header */}
+      <View style={styles.header}>
+        <Pressable onPress={() => router.back()} style={styles.backBtn}>
+          <Ionicons name="chevron-back" size={22} color="#111" />
+        </Pressable>
+        <ThemedText style={styles.headerTitle}>Capsule</ThemedText>
+        <View style={{ width: 40 }} />
+      </View>
+
       <ScrollView
         contentContainerStyle={styles.container}
-        refreshControl={
-          <RefreshControl refreshing={loading} onRefresh={loadCapsule} />
-        }
+        refreshControl={<RefreshControl refreshing={loading} onRefresh={loadCapsule} />}
       >
         {loading ? (
           <ThemedView style={styles.center}>
             <ActivityIndicator />
-            <ThemedText style={[styles.textDark, { marginTop: 8 }]}>
-              Loading capsule…
-            </ThemedText>
+            <ThemedText style={[styles.textDark, { marginTop: 8 }]}>Loading capsule…</ThemedText>
           </ThemedView>
         ) : !capsule ? (
-          <ThemedText style={[styles.notFound, styles.textDark]}>
-            Capsule not found.
-          </ThemedText>
+          <ThemedText style={[styles.notFound, styles.textDark]}>Capsule not found.</ThemedText>
         ) : (
           <ThemedView style={styles.card}>
+            {/* COVER */}
+            {!!coverUrl && (
+              <View style={styles.coverWrap}>
+                <Image source={{ uri: coverUrl }} style={styles.coverImg} />
+              </View>
+            )}
+
             {/* TITLE */}
             <ThemedText type="title" style={[styles.title, styles.textDark]}>
               {capsule.title ?? "Untitled capsule"}
@@ -69,64 +149,94 @@ export default function CapsuleDetails() {
 
             {/* DESCRIPTION */}
             {!!capsule.description && (
-              <ThemedText style={[styles.desc, styles.textDark]}>
-                {capsule.description}
-              </ThemedText>
+              <ThemedText style={[styles.desc, styles.textDark]}>{capsule.description}</ThemedText>
             )}
 
             {/* META */}
-            <ThemedText style={[styles.meta, styles.textDark]}>
-              Type: {capsule.capsule_type}
-            </ThemedText>
-            <ThemedText style={[styles.meta, styles.textDark]}>
-              Status: {capsule.status}
-            </ThemedText>
+            <View style={styles.metaRow}>
+              <Pill text={`Type: ${capsule.capsule_type}`} />
+              <Pill text={`Status: ${capsule.status}`} />
+              {isCo && !!progressLabel && <Pill text={progressLabel} />}
+            </View>
+
+            {/* CO CTA */}
+            {isCo && (
+              <View style={{ marginTop: 10 }}>
+                {co?.isFull ? (
+                  <ThemedText style={[styles.metaText, styles.textDark]}>
+                    ✅ Co-Caps is full. Waiting to open (or open rules).
+                  </ThemedText>
+                ) : null}
+
+                {canContribute ? (
+                  <Pressable
+                    onPress={openCoContribute}
+                    style={({ pressed }) => [styles.plusBtn, pressed && { opacity: 0.9 }]}
+                  >
+                    <Ionicons name="add" size={18} color="#111" />
+                    <ThemedText style={styles.plusBtnText}>Add contribution</ThemedText>
+                  </Pressable>
+                ) : (
+                  <ThemedText style={[styles.metaText, styles.textDark]}>
+                    {co
+                      ? "Nu poți contribui (ai contribuit deja / e full / e open / e archived)."
+                      : "Co meta not available (check backend)."}
+                  </ThemedText>
+                )}
+              </View>
+            )}
 
             {/* CONTRIBUTIONS */}
-            <ThemedText style={[styles.sectionTitle, styles.textDark]}>
-              Contributions
-            </ThemedText>
+            <ThemedText style={[styles.sectionTitle, styles.textDark]}>Contributions</ThemedText>
 
             {contributions.length === 0 ? (
-              <ThemedText style={[styles.meta, styles.textDark]}>
+              <ThemedText style={[styles.metaText, styles.textDark]}>
                 No contributions yet (or capsule still locked).
               </ThemedText>
             ) : (
-              contributions.map((c, idx) => (
-                <ThemedView key={idx} style={styles.contribution}>
-                  <ThemedText
-                    style={[styles.contributionAuthor, styles.textDark]}
-                  >
-                    {c?.User?.username ??
-                      c?.User?.email ??
-                      "User"}
-                  </ThemedText>
+              <>
+                {/* COLAJ (doar dacă există poze) */}
+                {imageContribs.length > 0 && (
+                  <View style={styles.grid}>
+                    {imageContribs.slice(0, 9).map((c, idx) => (
+                      <View key={c.id ?? idx} style={styles.gridItem}>
+                        <Image source={{ uri: c.media_url! }} style={styles.gridImg} />
+                      </View>
+                    ))}
+                  </View>
+                )}
 
-                  {!!c?.content_text && (
-                    <ThemedText
-                      style={[styles.contributionText, styles.textDark]}
-                    >
-                      {c.content_text}
-                    </ThemedText>
-                  )}
+                {/* LISTĂ */}
+                {contributions.map((c, idx) => {
+                  const author =
+                    c?.User?.username || c?.User?.name || c?.User?.email || "User";
+                  return (
+                    <ThemedView key={c.id ?? idx} style={styles.contribution}>
+                      <ThemedText style={[styles.contributionAuthor, styles.textDark]}>
+                        {author}
+                      </ThemedText>
 
-                  {!!c?.media_url && (
-                    <ThemedText
-                      style={[styles.contributionText, styles.textDark]}
-                    >
-                      📎 {c.media_url}
-                    </ThemedText>
-                  )}
+                      {!!c?.content_text && (
+                        <ThemedText style={[styles.contributionText, styles.textDark]}>
+                          {c.content_text}
+                        </ThemedText>
+                      )}
 
-                  {!!c?.created_at && (
-                    <ThemedText
-                      style={[styles.contributionDate, styles.textDark]}
-                    >
-                      {new Date(c.created_at).toLocaleString()}
-                    </ThemedText>
-                  )}
-                </ThemedView>
-              ))
+                      {!!c?.media_url && (
+                        <View style={styles.inlineImgWrap}>
+                          <Image source={{ uri: c.media_url }} style={styles.inlineImg} />
+                        </View>
+                      )}
+
+                      {!!c?.created_at && (
+                        <ThemedText style={[styles.contributionDate, styles.textDark]}>
+                          {new Date(c.created_at).toLocaleString()}
+                        </ThemedText>
+                      )}
+                    </ThemedView>
+                  );
+                })}
+              </>
             )}
           </ThemedView>
         )}
@@ -135,51 +245,105 @@ export default function CapsuleDetails() {
   );
 }
 
+function Pill({ text }: { text: string }) {
+  return (
+    <View style={styles.pill}>
+      <ThemedText style={styles.pillText}>{text}</ThemedText>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
-  container: {
-    padding: 16,
-    paddingBottom: 28,
-  },
-
-  center: {
-    marginTop: 40,
+  header: {
+    paddingTop: 56,
+    paddingHorizontal: 14,
+    paddingBottom: 12,
+    backgroundColor: "rgba(255,255,255,0.90)",
+    flexDirection: "row",
     alignItems: "center",
+    justifyContent: "space-between",
   },
+  backBtn: {
+    width: 40,
+    height: 36,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 12,
+    backgroundColor: "rgba(0,0,0,0.06)",
+  },
+  headerTitle: { fontSize: 16, fontWeight: "800", color: "#111" },
 
-  textDark: {
-    color: "#000",
-  },
-
-  notFound: {
-    padding: 16,
-  },
+  container: { padding: 16, paddingBottom: 28 },
+  center: { marginTop: 40, alignItems: "center" },
+  textDark: { color: "#000" },
+  notFound: { padding: 16 },
 
   card: {
     borderRadius: 18,
     padding: 14,
     backgroundColor: "rgba(255,255,255,0.88)",
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
   },
 
-  title: {
-    marginBottom: 8,
+  coverWrap: {
+    borderRadius: 16,
+    overflow: "hidden",
+    height: 200,
+    backgroundColor: "rgba(0,0,0,0.04)",
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
+    marginBottom: 12,
   },
+  coverImg: { width: "100%", height: "100%" },
 
-  desc: {
-    opacity: 0.85,
-    marginBottom: 10,
-  },
+  title: { marginBottom: 8 },
+  desc: { opacity: 0.85, marginBottom: 10 },
 
-  meta: {
-    marginTop: 6,
-    fontSize: 13,
-    opacity: 0.8,
+  metaRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 6 },
+  pill: {
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    backgroundColor: "rgba(0,0,0,0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
   },
+  pillText: { fontSize: 12, opacity: 0.85, color: "#111", fontWeight: "700" },
+  metaText: { marginTop: 8, fontSize: 13, opacity: 0.85 },
 
-  sectionTitle: {
-    marginTop: 16,
-    fontSize: 16,
-    fontWeight: "700",
+  plusBtn: {
+    marginTop: 10,
+    height: 44,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
+    backgroundColor: "rgba(255, 220, 195, 0.95)",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
   },
+  plusBtnText: { fontWeight: "800", color: "#111" },
+
+  sectionTitle: { marginTop: 16, fontSize: 16, fontWeight: "800" },
+
+  grid: {
+    marginTop: 12,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  gridItem: {
+    width: "31%",
+    aspectRatio: 1,
+    borderRadius: 14,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
+    backgroundColor: "rgba(0,0,0,0.04)",
+  },
+  gridImg: { width: "100%", height: "100%" },
 
   contribution: {
     marginTop: 12,
@@ -187,19 +351,18 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     backgroundColor: "rgba(0,0,0,0.06)",
   },
+  contributionAuthor: { fontWeight: "800", marginBottom: 6 },
+  contributionText: { fontSize: 14 },
 
-  contributionAuthor: {
-    fontWeight: "700",
-    marginBottom: 6,
+  inlineImgWrap: {
+    marginTop: 10,
+    borderRadius: 14,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
+    backgroundColor: "rgba(0,0,0,0.04)",
   },
+  inlineImg: { width: "100%", height: 220 },
 
-  contributionText: {
-    fontSize: 14,
-  },
-
-  contributionDate: {
-    marginTop: 6,
-    fontSize: 12,
-    opacity: 0.6,
-  },
+  contributionDate: { marginTop: 6, fontSize: 12, opacity: 0.6 },
 });
