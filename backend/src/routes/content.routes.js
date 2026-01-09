@@ -45,6 +45,15 @@ function getPostPkField() {
   return Post.primaryKeyAttribute || "id";
 }
 
+/**
+ * Owner field pentru Post (user_id / userId) - ca să știm dacă poate șterge
+ */
+function getPostOwnerField() {
+  if (hasAttr(Post, "user_id")) return "user_id";
+  if (hasAttr(Post, "userId")) return "userId";
+  return "user_id";
+}
+
 function getOrderField(model) {
   if (hasAttr(model, "created_at")) return "created_at";
   if (hasAttr(model, "createdAt")) return "createdAt";
@@ -144,47 +153,39 @@ function getCommentOrder() {
 
 /**
  * ✅ Ensure tables exist (DEV FRIENDLY)
- * Dacă primești 208 "Invalid object name 'post_like'" / 'post_comment',
- * înseamnă că tabelele nu există în DB.
- * Aici încercăm să le creăm prin sync() o singură dată.
  */
 let ensurePromise = null;
 async function ensureSocialTables() {
   if (ensurePromise) return ensurePromise;
 
   ensurePromise = (async () => {
-    // Post (de obicei există deja)
     try {
       await Post.sync();
-    } catch {
-      // ignore
-    }
+    } catch {}
 
-    // IMPORTANT: astea 2 sunt cele care lipsesc cel mai des
     try {
       await PostLike.sync();
-    } catch (e) {
-      // lasă să fie prins mai jos când chiar avem nevoie
-    }
+    } catch {}
 
     try {
       await PostComment.sync();
-    } catch (e) {
-      // la fel
-    }
+    } catch {}
   })();
 
   return ensurePromise;
 }
 
 /**
- * ✅ enrichCounts (robust):
+ * ✅ enrichCounts + canDelete
  * - ia PK real din Post (id / post_id)
- * - numără likes/comments în funcție de coloanele reale din modele
+ * - numără likes/comments în funcție de coloanele reale
+ * - adaugă canDelete doar dacă avem req.user (deci rutele trebuie să fie auth)
  */
-async function enrichCounts(posts) {
+async function enrichCounts(req, posts) {
   const arr = Array.isArray(posts) ? posts : [];
   const pk = getPostPkField();
+  const ownerField = getPostOwnerField();
+  const authUserId = getAuthUserId(req);
 
   const ids = arr
     .map((p) => (typeof p?.get === "function" ? p.get(pk) : p?.[pk]))
@@ -195,6 +196,7 @@ async function enrichCounts(posts) {
       ...(typeof p?.toJSON === "function" ? p.toJSON() : p),
       likeCount: 0,
       commentCount: 0,
+      canDelete: false,
     }));
   }
 
@@ -235,10 +237,17 @@ async function enrichCounts(posts) {
     const json = typeof p?.toJSON === "function" ? p.toJSON() : p;
     const pid = Number(typeof p?.get === "function" ? p.get(pk) : p?.[pk]);
 
+    // owner id din record (snake/camel)
+    const ownerId = Number(
+      json?.[ownerField] ??
+        (typeof p?.get === "function" ? p.get(ownerField) : p?.[ownerField])
+    );
+
     return {
       ...json,
       likeCount: likeCounts[pid] ?? 0,
       commentCount: commentCounts[pid] ?? 0,
+      canDelete: !!authUserId && ownerId === Number(authUserId),
     };
   });
 }
@@ -269,13 +278,11 @@ async function getCountsForPost(postId) {
 }
 
 // ─────────────────────────────────────────────
-// IMPORTANT: /posts/search trebuie să fie ÎNAINTE de /posts/:id
+// IMPORTANT: /posts/search înainte de /posts/:id
 // ─────────────────────────────────────────────
 
-// ─────────────────────────────────────────────
 // SEARCH POSTS
 // GET /content/posts/search?q=...
-// ─────────────────────────────────────────────
 router.get("/posts/search", auth, async (req, res, next) => {
   try {
     const q = String(req.query.q || "").trim();
@@ -293,7 +300,6 @@ router.get("/posts/search", auth, async (req, res, next) => {
 
     const includeUserForPost = makeUserIncludeFor(Post);
 
-    // 1) match în text
     const byText = await Post.findAll({
       where: { [Op.or]: whereOr },
       include: [includeUserForPost],
@@ -301,7 +307,6 @@ router.get("/posts/search", auth, async (req, res, next) => {
       limit: 50,
     });
 
-    // 2) match în user
     let byUser = [];
     if (userWhereOr.length) {
       byUser = await Post.findAll({
@@ -317,7 +322,6 @@ router.get("/posts/search", auth, async (req, res, next) => {
       });
     }
 
-    // merge unique by PK real
     const pk = getPostPkField();
     const map = new Map();
     for (const p of [...byText, ...byUser]) {
@@ -327,20 +331,16 @@ router.get("/posts/search", auth, async (req, res, next) => {
 
     const merged = Array.from(map.values()).slice(0, 80);
 
-    // asigură tabelele înainte de count
     await ensureSocialTables();
-
-    const enriched = await enrichCounts(merged);
+    const enriched = await enrichCounts(req, merged);
     return res.json(enriched);
   } catch (e) {
     next(e);
   }
 });
 
-// ─────────────────────────────────────────────
-// GET /content/posts  -> feed
-// ─────────────────────────────────────────────
-router.get("/posts", async (req, res, next) => {
+// GET /content/posts  -> feed (✅ acum cu auth ca să returneze canDelete corect)
+router.get("/posts", auth, async (req, res, next) => {
   try {
     const limit = Math.min(Math.max(Number(req.query.limit || 100), 1), 200);
     const includeUserForPost = makeUserIncludeFor(Post);
@@ -352,17 +352,15 @@ router.get("/posts", async (req, res, next) => {
     });
 
     await ensureSocialTables();
-    const enriched = await enrichCounts(posts);
+    const enriched = await enrichCounts(req, posts);
     return res.json(enriched);
   } catch (e) {
     next(e);
   }
 });
 
-// ─────────────────────────────────────────────
-// GET /content/posts/:id
-// ─────────────────────────────────────────────
-router.get("/posts/:id", async (req, res, next) => {
+// GET /content/posts/:id (✅ auth ca să aibă canDelete)
+router.get("/posts/:id", auth, async (req, res, next) => {
   try {
     const id = toId(req.params.id);
     if (!id) return res.status(400).json({ message: "Invalid post id" });
@@ -376,16 +374,14 @@ router.get("/posts/:id", async (req, res, next) => {
     if (!post) return res.status(404).json({ message: "Not found" });
 
     await ensureSocialTables();
-    const [enriched] = await enrichCounts([post]);
+    const [enriched] = await enrichCounts(req, [post]);
     return res.json(enriched);
   } catch (e) {
     next(e);
   }
 });
 
-// ─────────────────────────────────────────────
 // POST /content/posts  -> creare postare
-// ─────────────────────────────────────────────
 router.post("/posts", auth, async (req, res, next) => {
   try {
     const { content_text = "", media_url = null, visibility = "public" } = req.body || {};
@@ -416,16 +412,63 @@ router.post("/posts", auth, async (req, res, next) => {
     const full = await Post.findByPk(createdId, { include: [includeUserForPost] });
 
     await ensureSocialTables();
-    const [enriched] = await enrichCounts([full || created]);
+    const [enriched] = await enrichCounts(req, [full || created]);
     return res.status(201).json(enriched);
   } catch (e) {
     next(e);
   }
 });
 
-// ─────────────────────────────────────────────
+// ✅ DELETE /content/posts/:id  -> doar owner
+router.delete("/posts/:id", auth, async (req, res, next) => {
+  const t = await sequelize.transaction();
+  try {
+    await ensureSocialTables();
+
+    const postId = toId(req.params.id);
+    if (!postId) {
+      await t.rollback();
+      return res.status(400).json({ message: "Invalid post id" });
+    }
+
+    const userId = getAuthUserId(req);
+    if (!userId) {
+      await t.rollback();
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    const post = await Post.findByPk(postId, { transaction: t });
+    if (!post) {
+      await t.rollback();
+      return res.status(404).json({ message: "Post not found" });
+    }
+
+    const ownerField = getPostOwnerField();
+    const ownerId = Number(post?.get?.(ownerField) ?? post?.[ownerField]);
+
+    if (ownerId !== Number(userId)) {
+      await t.rollback();
+      return res.status(403).json({ message: "You can delete only your posts" });
+    }
+
+    const { postCol: likePostCol } = getLikeCols();
+    const { postCol: commPostCol } = getCommentCols();
+
+    await PostLike.destroy({ where: { [likePostCol]: postId }, transaction: t });
+    await PostComment.destroy({ where: { [commPostCol]: postId }, transaction: t });
+
+    const pk = getPostPkField();
+    await Post.destroy({ where: { [pk]: postId }, transaction: t });
+
+    await t.commit();
+    return res.json({ ok: true });
+  } catch (e) {
+    await t.rollback();
+    next(e);
+  }
+});
+
 // POST /content/posts/:id/like
-// ─────────────────────────────────────────────
 router.post("/posts/:id/like", auth, async (req, res, next) => {
   try {
     await ensureSocialTables();
@@ -441,7 +484,6 @@ router.post("/posts/:id/like", auth, async (req, res, next) => {
 
     const { postCol, userCol } = getLikeCols();
 
-    // dacă tabela tot nu există, vei primi 208 – îl prindem și îl afișăm clar
     try {
       const existing = await PostLike.findOne({
         where: { [postCol]: postId, [userCol]: userId },
@@ -468,9 +510,7 @@ router.post("/posts/:id/like", auth, async (req, res, next) => {
   }
 });
 
-// ─────────────────────────────────────────────
 // DELETE /content/posts/:id/like
-// ─────────────────────────────────────────────
 router.delete("/posts/:id/like", auth, async (req, res, next) => {
   try {
     await ensureSocialTables();
@@ -498,9 +538,7 @@ router.delete("/posts/:id/like", auth, async (req, res, next) => {
   }
 });
 
-// ─────────────────────────────────────────────
 // GET /content/posts/:id/comments
-// ─────────────────────────────────────────────
 router.get("/posts/:id/comments", async (req, res, next) => {
   try {
     await ensureSocialTables();
@@ -526,9 +564,7 @@ router.get("/posts/:id/comments", async (req, res, next) => {
   }
 });
 
-// ─────────────────────────────────────────────
 // POST /content/posts/:id/comments
-// ─────────────────────────────────────────────
 router.post("/posts/:id/comments", auth, async (req, res, next) => {
   try {
     await ensureSocialTables();

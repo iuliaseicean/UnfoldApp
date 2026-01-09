@@ -21,6 +21,14 @@ export type CoCapsMetaFields = {
   isFull?: boolean | null;
   canContribute?: boolean | null;
   required_contributors?: number | null;
+
+  /**
+   * ✅ Delete permissions (din backend, dacă există)
+   * - canDelete: backend spune că user-ul curent poate șterge capsula
+   * - isMine: helper (în UI) - true dacă e capsula mea
+   */
+  canDelete?: boolean;
+  isMine?: boolean;
 };
 
 export type CapsuleContribution = {
@@ -98,6 +106,7 @@ function pickArr(raw: any): any[] {
  * ✅ Normalizează capsulele:
  * - dacă backend trimite meta în `row.co` sau direct pe capsule,
  *   o punem direct pe capsule pentru feed.
+ * - preia și permisiunile de delete dacă există (canDelete / can_delete)
  */
 function normalizeCapsule(row: any): Capsule & CoCapsMetaFields {
   const c: any = row?.capsule ?? row ?? {};
@@ -121,14 +130,32 @@ function normalizeCapsule(row: any): Capsule & CoCapsMetaFields {
 
   // merge: co meta are prioritate, apoi direct
   const mergedMeta: CoCapsMetaFields = {
-    required_contributors:
-      coMeta.required_contributors ?? directMeta.required_contributors ?? null,
+    required_contributors: coMeta.required_contributors ?? directMeta.required_contributors ?? null,
     contributorsCount: coMeta.contributorsCount ?? directMeta.contributorsCount ?? null,
     isFull: coMeta.isFull ?? directMeta.isFull ?? null,
     canContribute: coMeta.canContribute ?? directMeta.canContribute ?? null,
   };
 
-  return { ...(c as Capsule), ...mergedMeta };
+  // ✅ delete permissions (pot veni ori pe capsulă ori pe wrapper)
+  const canDelete =
+    typeof c?.canDelete === "boolean"
+      ? c.canDelete
+      : typeof c?.can_delete === "boolean"
+      ? c.can_delete
+      : typeof row?.canDelete === "boolean"
+      ? row.canDelete
+      : typeof row?.can_delete === "boolean"
+      ? row.can_delete
+      : undefined;
+
+  const isMine =
+    typeof c?.isMine === "boolean"
+      ? c.isMine
+      : typeof row?.isMine === "boolean"
+      ? row.isMine
+      : undefined;
+
+  return { ...(c as Capsule), ...mergedMeta, canDelete, isMine };
 }
 
 function normalizeCapsuleList(rows: any[]): (Capsule & CoCapsMetaFields)[] {
@@ -146,9 +173,7 @@ export async function getCapsules(): Promise<(Capsule & CoCapsMetaFields)[]> {
 /**
  * LIST - toate capsulele (feed helper)
  */
-export async function getAllCapsules(
-  limit: number = 200
-): Promise<(Capsule & CoCapsMetaFields)[]> {
+export async function getAllCapsules(limit: number = 200): Promise<(Capsule & CoCapsMetaFields)[]> {
   const res = await api.get("/capsules", { params: { limit } });
   return normalizeCapsuleList(pickArr(res.data));
 }
@@ -166,8 +191,7 @@ export async function getCapsuleById(id: number): Promise<CapsuleDetailsResponse
   return {
     capsule,
     contributions: Array.isArray(data?.contributions) ? data.contributions : [],
-    uniqueContributors:
-      typeof data?.uniqueContributors === "number" ? data.uniqueContributors : null,
+    uniqueContributors: typeof data?.uniqueContributors === "number" ? data.uniqueContributors : null,
     co: data?.co ?? null,
     key: data?.key ?? null,
   };
@@ -176,9 +200,7 @@ export async function getCapsuleById(id: number): Promise<CapsuleDetailsResponse
 /**
  * CREATE (time/co/key)
  */
-export async function createCapsule(
-  payload: CreateCapsulePayload
-): Promise<CreateCapsuleResponse> {
+export async function createCapsule(payload: CreateCapsulePayload): Promise<CreateCapsuleResponse> {
   const res = await api.post("/capsules", payload);
   // backend poate întoarce direct capsule sau obiect cu meta
   return normalizeCapsule(res.data) as any;
@@ -207,10 +229,7 @@ export async function addCapsuleContribution(
 /**
  * KEY: UNLOCK (introduci parola și primești poza)
  */
-export async function unlockKeyCapsule(
-  capsuleId: number,
-  key: string
-): Promise<UnlockResponse> {
+export async function unlockKeyCapsule(capsuleId: number, key: string): Promise<UnlockResponse> {
   const res = await api.post(`/capsules/${capsuleId}/unlock`, { key });
   return res.data as UnlockResponse;
 }
@@ -229,11 +248,20 @@ export async function generateKeyForCapsule(
 /**
  * KEY: JOIN WITH KEY (auth)
  */
-export async function joinWithKey(
-  capsuleId: number,
-  key: string
-): Promise<{ message?: string }> {
+export async function joinWithKey(capsuleId: number, key: string): Promise<{ message?: string }> {
   const res = await api.post(`/capsules/${capsuleId}/join-with-key`, { key });
+  return res.data;
+}
+
+/**
+ * ✅ Delete capsule (doar owner - backend trebuie să verifice)
+ * Backend recomandat: DELETE /capsules/:id
+ */
+export async function deleteCapsule(capsuleId: number): Promise<{ ok?: boolean }> {
+  const id = Number(capsuleId);
+  if (!Number.isFinite(id) || id <= 0) throw new Error("Invalid capsuleId");
+
+  const res = await api.delete(`/capsules/${id}`);
   return res.data;
 }
 
@@ -242,9 +270,7 @@ export async function joinWithKey(
  * - backend: GET /capsules/search?q=
  * - fallback local: ia /capsules și filtrează local
  */
-export async function searchCapsules(
-  q: string
-): Promise<(Capsule & CoCapsMetaFields)[]> {
+export async function searchCapsules(q: string): Promise<(Capsule & CoCapsMetaFields)[]> {
   const query = String(q || "").trim();
   if (!query) return [];
 

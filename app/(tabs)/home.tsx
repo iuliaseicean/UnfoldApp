@@ -20,8 +20,8 @@ import { ThemedText } from "@/components/themed-text";
 import { ThemedView } from "@/components/themed-view";
 import { Fonts } from "@/constants/theme";
 
-import { getCapsules } from "@/lib/capsules";
-import { getPosts, likePost, unlikePost, PostItem } from "@/lib/posts";
+import { deleteCapsule, getCapsules } from "@/lib/capsules";
+import { deletePost, getPosts, likePost, unlikePost, PostItem } from "@/lib/posts";
 
 const BG = require("@/assets/images/brown-metallic-foil-background-texture-free-photo.jpg");
 
@@ -43,11 +43,20 @@ type Capsule = {
   contributorsCount?: number | null;
   isFull?: boolean | null;
   canContribute?: boolean | null;
+
+  // ✅ delete permission (din backend / normalizat)
+  canDelete?: boolean;
+  isMine?: boolean;
+};
+
+type PostItemWithDelete = PostItem & {
+  canDelete?: boolean;
+  isMine?: boolean;
 };
 
 type FeedItem =
   | { kind: "capsule"; ts: number; capsule: Capsule }
-  | { kind: "post"; ts: number; post: PostItem };
+  | { kind: "post"; ts: number; post: PostItemWithDelete };
 
 function parseTs(value?: string | null) {
   if (!value) return 0;
@@ -82,7 +91,7 @@ function clamp(n: number, a: number, b: number) {
 
 export default function HomeScreen() {
   const [capsules, setCapsules] = useState<Capsule[]>([]);
-  const [posts, setPosts] = useState<PostItem[]>([]);
+  const [posts, setPosts] = useState<PostItemWithDelete[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string>("");
@@ -90,6 +99,10 @@ export default function HomeScreen() {
   // like state local (MVP)
   const [liked, setLiked] = useState<Record<number, boolean>>({});
   const [busyLike, setBusyLike] = useState<Record<number, boolean>>({});
+
+  // delete busy (evită double tap)
+  const [busyDeletePost, setBusyDeletePost] = useState<Record<number, boolean>>({});
+  const [busyDeleteCapsule, setBusyDeleteCapsule] = useState<Record<number, boolean>>({});
 
   // ca să nu spammăm reload pe focus
   const didFirstLoad = useRef(false);
@@ -101,7 +114,7 @@ export default function HomeScreen() {
 
       const [caps, pst] = await Promise.all([getCapsules(), getPosts()]);
       setCapsules(Array.isArray(caps) ? (caps as any) : []);
-      setPosts(Array.isArray(pst) ? pst : []);
+      setPosts(Array.isArray(pst) ? (pst as any) : []);
 
       // init liked map only for new posts (NU resetăm ce a apăsat user-ul)
       setLiked((prev) => {
@@ -125,7 +138,7 @@ export default function HomeScreen() {
   const reloadPostsOnly = useCallback(async () => {
     try {
       const pst = await getPosts();
-      setPosts(Array.isArray(pst) ? pst : []);
+      setPosts(Array.isArray(pst) ? (pst as any) : []);
       setLiked((prev) => {
         const next = { ...prev };
         for (const p of Array.isArray(pst) ? pst : []) {
@@ -155,7 +168,6 @@ export default function HomeScreen() {
   useFocusEffect(
     useCallback(() => {
       if (!didFirstLoad.current) return;
-      // ✅ după contribute la co-cap, când revii în home, vezi progresul
       reloadCapsulesOnly();
       reloadPostsOnly();
     }, [reloadCapsulesOnly, reloadPostsOnly])
@@ -188,7 +200,6 @@ export default function HomeScreen() {
   }, [capsules, posts]);
 
   const makeKeyDeepLink = (capsuleId: number) => Linking.createURL(`/capsule/key/${capsuleId}`);
-
   const goToKeyUnlock = (capsuleId: number) => router.push(`/capsule/key/${capsuleId}` as any);
 
   const openComments = (postId: number) => {
@@ -219,8 +230,6 @@ export default function HomeScreen() {
     try {
       if (!isLiked) await likePost(postId);
       else await unlikePost(postId);
-
-      // ✅ sincronizează count real din DB (și între useri)
       await reloadPostsOnly();
     } catch {
       // revert UI
@@ -239,10 +248,81 @@ export default function HomeScreen() {
   };
 
   const goToCoContribute = (capsuleId: number) => {
-    // ✅ ecran dedicat pentru upload & submit
-    // IMPORTANT: trebuie să creezi app/capsule/co/[id].tsx
     router.push(`/capsule/co/${capsuleId}` as any);
   };
+
+  // ✅ DELETE Post (doar dacă canDelete)
+  const onDeletePost = useCallback(
+    (postId: number) => {
+      if (busyDeletePost[postId]) return;
+
+      Alert.alert("Șterge postarea?", "Acțiunea este permanentă.", [
+        { text: "Anulează", style: "cancel" },
+        {
+          text: "Șterge",
+          style: "destructive",
+          onPress: async () => {
+            setBusyDeletePost((m) => ({ ...m, [postId]: true }));
+
+            // optimistic remove
+            setPosts((arr) => arr.filter((p) => p.id !== postId));
+
+            try {
+              await deletePost(postId);
+              await reloadPostsOnly();
+            } catch (e: any) {
+              Alert.alert("Eroare", e?.response?.data?.message || "Nu am putut șterge postarea.");
+              await reloadPostsOnly();
+            } finally {
+              setBusyDeletePost((m) => ({ ...m, [postId]: false }));
+            }
+          },
+        },
+      ]);
+    },
+    [busyDeletePost, reloadPostsOnly]
+  );
+
+  // ✅ DELETE Capsule (doar dacă canDelete)
+  const onDeleteCapsule = useCallback(
+    (capsuleId: number) => {
+      if (busyDeleteCapsule[capsuleId]) return;
+
+      Alert.alert(
+        "Șterge capsula?",
+        "Se vor șterge și contribuțiile/cheia asociată (dacă există).",
+        [
+          { text: "Anulează", style: "cancel" },
+          {
+            text: "Șterge",
+            style: "destructive",
+            onPress: async () => {
+              setBusyDeleteCapsule((m) => ({ ...m, [capsuleId]: true }));
+
+              // optimistic remove
+              setCapsules((arr) => arr.filter((c) => c.capsule_id !== capsuleId));
+
+              try {
+                await deleteCapsule(capsuleId);
+                await reloadCapsulesOnly();
+              } catch (e: any) {
+                Alert.alert(
+                  "Eroare",
+                  e?.response?.data?.error ||
+                    e?.response?.data?.message ||
+                    "Nu am putut șterge capsula."
+                );
+                await reloadCapsulesOnly();
+              } finally {
+                setBusyDeleteCapsule((m) => ({ ...m, [capsuleId]: false }));
+              }
+            },
+          },
+        ]
+      );
+    },
+    [busyDeleteCapsule, reloadCapsulesOnly]
+  );
 
   return (
     <ImageBackground source={BG} style={{ flex: 1 }}>
@@ -304,13 +384,11 @@ export default function HomeScreen() {
               const contributed = Number(c.contributorsCount ?? 0) || 0;
               const isFull = !!c.isFull || (required > 0 && contributed >= required);
 
-              // dacă backend nu trimite canContribute, nu arătăm "+" (ca să nu fie bug)
-              const canContribute =
-                isCo && !!c.canContribute && !isFull && c.status !== "archived";
-
+              const canContribute = isCo && !!c.canContribute && !isFull && c.status !== "archived";
               const progressPct = isCo && required > 0 ? clamp(contributed / required, 0, 1) : 0;
 
               const qrValue = makeKeyDeepLink(c.capsule_id);
+              const canDelete = !!c.canDelete;
 
               return (
                 <Pressable
@@ -324,15 +402,32 @@ export default function HomeScreen() {
                   {isKey ? (
                     <View style={styles.keyTop}>
                       <View style={styles.keyBadgesRow}>
-                        <Badge text={type} tone="neutral" />
-                        <Badge text={st.text} tone={st.tone} />
+                        <View style={{ flexDirection: "row", gap: 10, flex: 1 }}>
+                          <Badge text={type} tone="neutral" />
+                          <Badge text={st.text} tone={st.tone} />
+                        </View>
+
+                        {canDelete ? (
+                          <Pressable
+                            onPress={(e) => {
+                              (e as any)?.stopPropagation?.();
+                              onDeleteCapsule(c.capsule_id);
+                            }}
+                            style={({ pressed }) => [styles.trashMini, pressed && { opacity: 0.8 }]}
+                            hitSlop={10}
+                          >
+                            <Ionicons name="trash-outline" size={18} color="#111" />
+                          </Pressable>
+                        ) : null}
                       </View>
 
                       <View style={styles.qrWrap}>
                         <View style={styles.qrCard}>
                           <QRCode value={qrValue} size={140} />
                         </View>
-                        <ThemedText style={styles.qrHint}>Scanează QR-ul sau apasă „Unlock”</ThemedText>
+                        <ThemedText style={styles.qrHint}>
+                          Scanează QR-ul sau apasă „Unlock”
+                        </ThemedText>
                       </View>
                     </View>
                   ) : cover ? (
@@ -342,14 +437,35 @@ export default function HomeScreen() {
 
                       <View style={styles.coverBadges}>
                         <Badge text={type} tone="neutral" />
-                        <Badge text={st.text} tone={st.tone} />
+
+                        <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                          <Badge text={st.text} tone={st.tone} />
+
+                          {canDelete ? (
+                            <Pressable
+                              onPress={(e) => {
+                                (e as any)?.stopPropagation?.();
+                                onDeleteCapsule(c.capsule_id);
+                              }}
+                              style={({ pressed }) => [
+                                styles.trashMiniOnCover,
+                                pressed && { opacity: 0.8 },
+                              ]}
+                              hitSlop={10}
+                            >
+                              <Ionicons name="trash-outline" size={18} color="#111" />
+                            </Pressable>
+                          ) : null}
+                        </View>
                       </View>
 
                       {/* ✅ CO progress overlay */}
                       {isCo && required > 0 ? (
                         <View style={styles.coProgressWrap}>
                           <View style={styles.coProgressBar}>
-                            <View style={[styles.coProgressFill, { width: `${progressPct * 100}%` }]} />
+                            <View
+                              style={[styles.coProgressFill, { width: `${progressPct * 100}%` }]}
+                            />
                           </View>
                           <ThemedText style={styles.coProgressText}>
                             {contributed}/{required} contributors
@@ -361,7 +477,6 @@ export default function HomeScreen() {
                       {canContribute ? (
                         <Pressable
                           onPress={(e) => {
-                            // nu navigăm în capsule details când dai pe +
                             (e as any)?.stopPropagation?.();
                             goToCoContribute(c.capsule_id);
                           }}
@@ -374,7 +489,23 @@ export default function HomeScreen() {
                   ) : (
                     <View style={styles.capsuleTopRow}>
                       <Badge text={type} tone="neutral" />
-                      <Badge text={st.text} tone={st.tone} />
+
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                        <Badge text={st.text} tone={st.tone} />
+
+                        {canDelete ? (
+                          <Pressable
+                            onPress={(e) => {
+                              (e as any)?.stopPropagation?.();
+                              onDeleteCapsule(c.capsule_id);
+                            }}
+                            style={({ pressed }) => [styles.trashMini, pressed && { opacity: 0.8 }]}
+                            hitSlop={10}
+                          >
+                            <Ionicons name="trash-outline" size={18} color="#111" />
+                          </Pressable>
+                        ) : null}
+                      </View>
                     </View>
                   )}
 
@@ -388,11 +519,17 @@ export default function HomeScreen() {
                     ) : null}
 
                     <View style={styles.metaRow}>
-                      <ThemedText style={styles.metaText}>Created: {formatDate(c.created_at)}</ThemedText>
+                      <ThemedText style={styles.metaText}>
+                        Created: {formatDate(c.created_at)}
+                      </ThemedText>
 
                       {isCo && required > 0 ? (
                         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                          {isFull ? <Badge text="Full" tone="archived" /> : <Badge text={`${contributed}/${required}`} tone="neutral" />}
+                          {isFull ? (
+                            <Badge text="Full" tone="archived" />
+                          ) : (
+                            <Badge text={`${contributed}/${required}`} tone="neutral" />
+                          )}
 
                           <Pressable
                             onPress={() => router.push(`/capsule/${c.capsule_id}` as any)}
@@ -427,11 +564,25 @@ export default function HomeScreen() {
             const commentCount = p.commentCount ?? 0;
             const isLiked = !!liked[p.id];
 
+            const canDelete = !!(p as any)?.canDelete;
+
             return (
               <ThemedView key={`p-${p.id}-${idx}`} style={styles.postCard}>
                 <View style={styles.postHeader}>
-                  <ThemedText style={styles.postAuthor}>{author}</ThemedText>
-                  <ThemedText style={styles.postDate}>{formatDate(p.created_at)}</ThemedText>
+                  <View style={{ flex: 1, paddingRight: 10 }}>
+                    <ThemedText style={styles.postAuthor}>{author}</ThemedText>
+                    <ThemedText style={styles.postDate}>{formatDate(p.created_at)}</ThemedText>
+                  </View>
+
+                  {canDelete ? (
+                    <Pressable
+                      onPress={() => onDeletePost(p.id)}
+                      style={({ pressed }) => [styles.postTrashBtn, pressed && { opacity: 0.8 }]}
+                      hitSlop={10}
+                    >
+                      <Ionicons name="trash-outline" size={18} color="#111" />
+                    </Pressable>
+                  ) : null}
                 </View>
 
                 {!!p.content_text && <ThemedText style={styles.postText}>{p.content_text}</ThemedText>}
@@ -533,7 +684,8 @@ const styles = StyleSheet.create({
   },
 
   keyTop: { padding: 12, gap: 12, backgroundColor: "rgba(255,255,255,0.92)" },
-  keyBadgesRow: { flexDirection: "row", justifyContent: "space-between", gap: 10 },
+  keyBadgesRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 10 },
+
   qrWrap: { alignItems: "center", gap: 8, paddingBottom: 6 },
   qrCard: {
     padding: 12,
@@ -554,7 +706,30 @@ const styles = StyleSheet.create({
     bottom: 10,
     flexDirection: "row",
     justifyContent: "space-between",
+    alignItems: "center",
     gap: 10,
+  },
+
+  // ✅ small trash buttons (în flow, nu absolute)
+  trashMini: {
+    width: 34,
+    height: 34,
+    borderRadius: 999,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(0,0,0,0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
+  },
+  trashMiniOnCover: {
+    width: 34,
+    height: 34,
+    borderRadius: 999,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.92)",
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.10)",
   },
 
   // ✅ CO progress overlay
@@ -604,6 +779,7 @@ const styles = StyleSheet.create({
     paddingBottom: 0,
     flexDirection: "row",
     justifyContent: "space-between",
+    alignItems: "center",
     gap: 10,
   },
 
@@ -649,11 +825,20 @@ const styles = StyleSheet.create({
   postHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
-    alignItems: "baseline",
+    alignItems: "flex-start",
     gap: 12,
   },
   postAuthor: { fontFamily: Fonts.rounded, fontSize: 16, color: "#111" },
   postDate: { fontSize: 12, opacity: 0.65, color: "#111" },
+  postTrashBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 999,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(0,0,0,0.06)",
+  },
+
   postText: { fontSize: 16, color: "#111", lineHeight: 20 },
 
   postImgWrap: {
