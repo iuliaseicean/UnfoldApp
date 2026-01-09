@@ -1,42 +1,72 @@
-import { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Image,
   ImageBackground,
   Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
-  TextInput,
   View,
 } from "react-native";
 import { useLocalSearchParams, router } from "expo-router";
 import Ionicons from "@expo/vector-icons/Ionicons";
 
-import { addPostComment, getPostComments, PostCommentItem } from "@/lib/posts";
 import { ThemedText } from "@/components/themed-text";
 import { ThemedView } from "@/components/themed-view";
 
+import { getPostById, likePost, unlikePost, PostItem } from "@/lib/posts";
+
 const BG = require("@/assets/images/brown-metallic-foil-background-texture-free-photo.jpg");
 
-export default function PostCommentsScreen() {
+function toIso(v: any) {
+  const s = String(v ?? "");
+  const t = Date.parse(s);
+  return Number.isNaN(t) ? new Date().toISOString() : new Date(t).toISOString();
+}
+
+export default function PostDetailsScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const postId = Number(id);
 
-  const [items, setItems] = useState<PostCommentItem[]>([]);
+  const [post, setPost] = useState<PostItem | null>(null);
   const [loading, setLoading] = useState(true);
-  const [sending, setSending] = useState(false);
-  const [text, setText] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+
+  // MVP: fără "likedByMe" din backend -> îl ținem local
+  const [liked, setLiked] = useState(false);
+  const [liking, setLiking] = useState(false);
+
+  const authorName = useMemo(() => {
+    return post?.User?.name || post?.User?.username || "User";
+  }, [post]);
+
+  const authorId = useMemo(() => {
+    // suportă id sau user_id
+    const u = post?.User as any;
+    return u?.id ?? u?.user_id ?? null;
+  }, [post]);
+
+  const created = useMemo(() => {
+    const raw = (post as any)?.created_at ?? (post as any)?.createdAt ?? null;
+    return raw ? toIso(raw) : null;
+  }, [post]);
 
   const load = useCallback(async () => {
     if (!postId) return;
-    setLoading(true);
+
     try {
-      const data = await getPostComments(postId);
-      setItems(data);
-    } catch (e) {
-      Alert.alert("Eroare", "Nu am putut încărca comentariile.");
-      setItems([]);
+      setLoading(true);
+      const data = await getPostById(postId);
+      if (!data) {
+        setPost(null);
+      } else {
+        setPost(data);
+      }
+    } catch (e: any) {
+      Alert.alert("Eroare", "Nu am putut încărca postarea.");
+      setPost(null);
     } finally {
       setLoading(false);
     }
@@ -46,85 +76,154 @@ export default function PostCommentsScreen() {
     load();
   }, [load]);
 
-  const submit = async () => {
-    const t = text.trim();
-    if (!t) return;
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await load();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [load]);
+
+  const toggleLike = useCallback(async () => {
     if (!postId) return;
+    if (liking) return;
 
     try {
-      setSending(true);
-      await addPostComment(postId, t);
-      setText("");
-      await load();
+      setLiking(true);
+
+      // optimistic UI
+      setLiked((prev) => !prev);
+      setPost((prev) => {
+        if (!prev) return prev;
+        const nextLiked = !liked;
+        const delta = nextLiked ? 1 : -1;
+        return { ...prev, likeCount: Math.max(0, (prev.likeCount ?? 0) + delta) };
+      });
+
+      if (!liked) {
+        await likePost(postId);
+      } else {
+        await unlikePost(postId);
+      }
     } catch (e) {
-      Alert.alert("Eroare", "Nu am putut trimite comentariul.");
+      // rollback
+      setLiked((prev) => !prev);
+      setPost((prev) => {
+        if (!prev) return prev;
+        const delta = liked ? 1 : -1; // invers pentru rollback
+        return { ...prev, likeCount: Math.max(0, (prev.likeCount ?? 0) + delta) };
+      });
+      Alert.alert("Eroare", "Nu am putut modifica like-ul.");
     } finally {
-      setSending(false);
+      setLiking(false);
     }
-  };
+  }, [postId, liking, liked]);
+
+  if (!postId) {
+    return (
+      <ThemedView style={styles.center}>
+        <ThemedText>Invalid post id.</ThemedText>
+      </ThemedView>
+    );
+  }
 
   return (
     <ImageBackground source={BG} style={{ flex: 1 }}>
+      {/* Header */}
       <View style={styles.header}>
         <Pressable onPress={() => router.back()} style={styles.backBtn}>
           <Ionicons name="chevron-back" size={22} color="#111" />
         </Pressable>
-        <ThemedText style={styles.headerTitle}>Comments</ThemedText>
+        <ThemedText style={styles.headerTitle}>Post</ThemedText>
         <View style={{ width: 40 }} />
       </View>
 
       <ScrollView
         contentContainerStyle={styles.container}
-        refreshControl={<RefreshControl refreshing={loading} onRefresh={load} />}
+        refreshControl={<RefreshControl refreshing={refreshing || loading} onRefresh={onRefresh} />}
       >
         {loading ? (
           <ThemedView style={styles.center}>
             <ActivityIndicator />
-            <ThemedText style={{ marginTop: 8, color: "#111" }}>
-              Loading…
-            </ThemedText>
+            <ThemedText style={{ marginTop: 8, color: "#111" }}>Loading…</ThemedText>
           </ThemedView>
-        ) : items.length === 0 ? (
-          <ThemedText style={styles.empty}>No comments yet.</ThemedText>
+        ) : !post ? (
+          <ThemedView style={styles.center}>
+            <ThemedText style={{ color: "#111" }}>Post not found.</ThemedText>
+          </ThemedView>
         ) : (
-          items.map((c) => {
-            const author = c.User?.name || c.User?.username || "User";
-            return (
-              <ThemedView key={c.id} style={styles.commentCard}>
-                <ThemedText style={styles.commentAuthor}>{author}</ThemedText>
-                <ThemedText style={styles.commentText}>
-                  {c.content_text}
+          <>
+            {/* Author row */}
+            <Pressable
+              onPress={() => {
+                if (!authorId) return;
+                router.push(`/user/${authorId}` as any);
+              }}
+              style={({ pressed }) => [styles.authorRow, pressed && { opacity: 0.9 }]}
+            >
+              <View style={styles.avatarFake}>
+                <Ionicons name="person" size={18} color="#111" />
+              </View>
+
+              <View style={{ flex: 1 }}>
+                <ThemedText style={styles.authorName}>{authorName}</ThemedText>
+                <ThemedText style={styles.dateText}>
+                  {created ? new Date(created).toLocaleString() : ""}
                 </ThemedText>
-                <ThemedText style={styles.commentDate}>
-                  {c.created_at ? new Date(c.created_at).toLocaleString() : ""}
-                </ThemedText>
+              </View>
+
+              <Ionicons name="chevron-forward" size={18} color="#111" style={{ opacity: 0.6 }} />
+            </Pressable>
+
+            {/* Image */}
+            {!!post.media_url && (
+              <View style={styles.imgWrap}>
+                <Image source={{ uri: post.media_url }} style={styles.img} />
+              </View>
+            )}
+
+            {/* Text */}
+            {!!post.content_text && (
+              <ThemedView style={styles.textCard}>
+                <ThemedText style={styles.postText}>{post.content_text}</ThemedText>
               </ThemedView>
-            );
-          })
+            )}
+
+            {/* Actions */}
+            <ThemedView style={styles.actionsRow}>
+              <Pressable
+                onPress={toggleLike}
+                disabled={liking}
+                style={({ pressed }) => [
+                  styles.actionBtn,
+                  pressed && { opacity: 0.8 },
+                  liking && { opacity: 0.6 },
+                ]}
+              >
+                <Ionicons
+                  name={liked ? "heart" : "heart-outline"}
+                  size={18}
+                  color="#111"
+                />
+                <ThemedText style={styles.actionText}>
+                  {post.likeCount ?? 0}
+                </ThemedText>
+              </Pressable>
+
+              <Pressable
+                onPress={() => router.push(`/post/${postId}/comments` as any)}
+                style={({ pressed }) => [styles.actionBtn, pressed && { opacity: 0.8 }]}
+              >
+                <Ionicons name="chatbubble-outline" size={18} color="#111" />
+                <ThemedText style={styles.actionText}>
+                  {post.commentCount ?? 0}
+                </ThemedText>
+              </Pressable>
+            </ThemedView>
+          </>
         )}
       </ScrollView>
-
-      <View style={styles.composer}>
-        <TextInput
-          value={text}
-          onChangeText={setText}
-          placeholder="Write a comment…"
-          placeholderTextColor="#777"
-          style={styles.input}
-          multiline
-        />
-        <Pressable
-          onPress={submit}
-          disabled={sending}
-          style={({ pressed }) => [
-            styles.sendBtn,
-            sending && { opacity: 0.6 },
-            pressed && { opacity: 0.75 },
-          ]}
-        >
-          <Ionicons name="send" size={18} color="#111" />
-        </Pressable>
-      </View>
     </ImageBackground>
   );
 }
@@ -149,50 +248,63 @@ const styles = StyleSheet.create({
   },
   headerTitle: { fontSize: 16, fontWeight: "800", color: "#111" },
 
-  container: { padding: 16, paddingBottom: 110, gap: 10 },
+  container: { padding: 16, paddingBottom: 28, gap: 12 },
   center: { marginTop: 24, alignItems: "center" },
-  empty: { textAlign: "center", color: "#fff", opacity: 0.9, marginTop: 14 },
 
-  commentCard: {
+  authorRow: {
+    padding: 12,
+    borderRadius: 16,
+    backgroundColor: "rgba(255,255,255,0.90)",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  avatarFake: {
+    width: 38,
+    height: 38,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(0,0,0,0.06)",
+  },
+  authorName: { fontWeight: "800", color: "#111" },
+  dateText: { fontSize: 12, opacity: 0.65, color: "#111", marginTop: 2 },
+
+  imgWrap: {
+    borderRadius: 18,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
+    backgroundColor: "rgba(0,0,0,0.04)",
+  },
+  img: { width: "100%", height: 340 },
+
+  textCard: {
     padding: 12,
     borderRadius: 16,
     backgroundColor: "rgba(255,255,255,0.90)",
   },
-  commentAuthor: { fontWeight: "800", marginBottom: 6, color: "#111" },
-  commentText: { color: "#111" },
-  commentDate: { marginTop: 8, fontSize: 12, opacity: 0.7, color: "#111" },
+  postText: { color: "#111", lineHeight: 20 },
 
-  composer: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 0,
+  actionsRow: {
     padding: 12,
-    backgroundColor: "rgba(255,255,255,0.92)",
+    borderRadius: 16,
+    backgroundColor: "rgba(255,255,255,0.90)",
     flexDirection: "row",
     gap: 10,
-    alignItems: "flex-end",
+    justifyContent: "space-between",
   },
-  input: {
+  actionBtn: {
     flex: 1,
-    minHeight: 44,
-    maxHeight: 110,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: "rgba(0,0,0,0.10)",
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    color: "#111",
-    backgroundColor: "rgba(255,255,255,1)",
-  },
-  sendBtn: {
-    width: 46,
     height: 46,
-    borderRadius: 16,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(0,0,0,0.06)",
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: "rgba(0,0,0,0.08)",
+    backgroundColor: "rgba(0,0,0,0.04)",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
   },
+  actionText: { fontWeight: "800", color: "#111" },
 });

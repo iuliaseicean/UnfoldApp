@@ -1,3 +1,4 @@
+// frontend/lib/posts.ts
 import api from "@/lib/api";
 
 export type PostUser = {
@@ -32,6 +33,15 @@ export type PostCommentItem = {
   User?: PostUser;
 };
 
+export type CreatePostPayload = {
+  content_text: string | null;
+  media_url?: string | null;
+  visibility?: string;
+};
+
+/**
+ * Normalizează răspunsul din backend: uneori vine array, alteori {posts:[]}, {data:[]}, {items:[]}
+ */
 function pickArr(raw: any): any[] {
   if (Array.isArray(raw)) return raw;
   if (Array.isArray(raw?.posts)) return raw.posts;
@@ -59,35 +69,48 @@ function mapUser(u: any): PostUser | undefined {
 }
 
 function mapPost(p: any): PostItem {
-  const id = Number(p.id ?? p.post_id);
+  const id = Number(p?.id ?? p?.post_id ?? 0);
+
   return {
     id,
-    user_id: Number(p.user_id ?? p.userId ?? 0),
-    content_text: String(p.content_text ?? p.contentText ?? ""),
-    media_url: p.media_url ?? p.mediaUrl ?? null,
-    visibility: String(p.visibility ?? "public"),
-    created_at: p.created_at
+    user_id: Number(p?.user_id ?? p?.userId ?? 0),
+    content_text: String(p?.content_text ?? p?.contentText ?? ""),
+    media_url: p?.media_url ?? p?.mediaUrl ?? null,
+    visibility: String(p?.visibility ?? "public"),
+    created_at: p?.created_at
       ? toIso(p.created_at)
-      : p.createdAt
+      : p?.createdAt
       ? toIso(p.createdAt)
       : new Date().toISOString(),
 
-    likeCount: Number(p.likeCount ?? 0),
-    commentCount: Number(p.commentCount ?? 0),
+    likeCount: Number(p?.likeCount ?? 0),
+    commentCount: Number(p?.commentCount ?? 0),
 
-    User: mapUser(p.User),
+    User: mapUser(p?.User),
   };
 }
 
 function mapComment(c: any, fallbackPostId?: number): PostCommentItem {
   return {
-    id: Number(c.id),
-    post_id: Number(c.post_id ?? c.postId ?? fallbackPostId ?? 0),
-    user_id: Number(c.user_id ?? c.userId ?? 0),
-    content_text: String(c.content_text ?? c.contentText ?? ""),
-    created_at: c.created_at ? toIso(c.created_at) : c.createdAt ? toIso(c.createdAt) : new Date().toISOString(),
-    User: mapUser(c.User),
+    id: Number(c?.id ?? 0),
+    post_id: Number(c?.post_id ?? c?.postId ?? fallbackPostId ?? 0),
+    user_id: Number(c?.user_id ?? c?.userId ?? 0),
+    content_text: String(c?.content_text ?? c?.contentText ?? ""),
+    created_at: c?.created_at
+      ? toIso(c.created_at)
+      : c?.createdAt
+      ? toIso(c.createdAt)
+      : new Date().toISOString(),
+    User: mapUser(c?.User),
   };
+}
+
+/**
+ * Helper pt navigare: întoarce id numeric valid sau null
+ */
+export function getPostNumericId(p: PostItem | any): number | null {
+  const n = Number(p?.id ?? p?.post_id);
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 /**
@@ -101,14 +124,27 @@ export async function getPosts(): Promise<PostItem[]> {
 }
 
 /**
+ * ✅ Get single post by id
+ * Backend: GET /content/posts/:id
+ */
+export async function getPostById(postId: number): Promise<PostItem | null> {
+  const id = Number(postId);
+  if (!Number.isFinite(id) || id <= 0) return null;
+
+  const res = await api.get(`/content/posts/${id}`);
+  const item = res.data;
+
+  if (!item) return null;
+  if (Array.isArray(item)) return item.length ? mapPost(item[0]) : null;
+
+  return mapPost(item);
+}
+
+/**
  * ✅ Create post
  * Backend: POST /content/posts
  */
-export async function createPost(payload: {
-  content_text: string | null;
-  media_url?: string | null;
-  visibility?: string;
-}): Promise<PostItem> {
+export async function createPost(payload: CreatePostPayload): Promise<PostItem> {
   const res = await api.post("/content/posts", payload);
   return mapPost(res.data);
 }
@@ -145,14 +181,51 @@ export async function addPostComment(postId: number, content_text: string): Prom
 }
 
 /**
+ * ✅ Posts by user (pentru pagina de profil a altui user)
+ * Backend recomandat: GET /users/:id/posts
+ * Fallback: dacă nu există endpoint-ul, filtrează local din getPosts()
+ */
+export async function getPostsByUserId(userId: number): Promise<PostItem[]> {
+  const id = Number(userId);
+  if (!Number.isFinite(id) || id <= 0) return [];
+
+  // 1) endpoint dedicat
+  try {
+    const res = await api.get(`/users/${id}/posts`);
+    const arr = pickArr(res.data);
+    return arr.map(mapPost);
+  } catch (e: any) {
+    const status = e?.response?.status;
+
+    // 404 -> fallback local
+    if (status === 404) {
+      const all = await getPosts();
+      return all.filter((p) => Number(p.user_id) === id);
+    }
+
+    throw e;
+  }
+}
+
+/**
+ * ✅ (optional) Delete post
+ * Backend recomandat: DELETE /content/posts/:id
+ */
+export async function deletePost(postId: number) {
+  const res = await api.delete(`/content/posts/${postId}`);
+  return res.data;
+}
+
+/**
  * ✅ SEARCH POSTS separat
  * Recomandat backend: GET /content/posts/search?q=
  * Dacă NU există încă endpoint-ul, facem fallback local din getPosts().
  */
 export async function searchPosts(q: string): Promise<PostItem[]> {
-  const query = q.trim();
+  const query = String(q || "").trim();
   if (!query) return [];
 
+  // 1) endpoint dedicat
   try {
     const res = await api.get("/content/posts/search", { params: { q: query } });
     const arr = pickArr(res.data);
@@ -160,7 +233,7 @@ export async function searchPosts(q: string): Promise<PostItem[]> {
   } catch (e: any) {
     const status = e?.response?.status;
 
-    // dacă endpoint-ul nu există -> fallback local
+    // 404 -> fallback local
     if (status === 404) {
       const all = await getPosts();
       const low = query.toLowerCase();
@@ -172,7 +245,6 @@ export async function searchPosts(q: string): Promise<PostItem[]> {
       });
     }
 
-    // altfel: eroare reală (401/500/network)
     throw e;
   }
 }
