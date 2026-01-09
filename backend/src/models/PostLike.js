@@ -1,3 +1,4 @@
+// backend/src/models/PostLike.js
 const { DataTypes } = require("sequelize");
 const { sequelize } = require("../config/db");
 const User = require("./User");
@@ -11,18 +12,22 @@ const PostLike = sequelize.define(
     post_id: {
       type: DataTypes.INTEGER,
       allowNull: false,
-      onDelete: "CASCADE",
-      onUpdate: "CASCADE",
+      references: {
+        model: Post,
+        key: Post.primaryKeyAttribute || "id",
+      },
     },
 
     user_id: {
       type: DataTypes.INTEGER,
       allowNull: false,
-      onDelete: "NO ACTION", // SQL Server: avoid multiple cascade paths
-      onUpdate: "CASCADE",
+      references: {
+        model: User,
+        key: User.primaryKeyAttribute || "id",
+      },
     },
 
-    created_at: { type: DataTypes.DATE, defaultValue: DataTypes.NOW },
+    created_at: { type: DataTypes.DATE, allowNull: false, defaultValue: DataTypes.NOW },
   },
   {
     tableName: "post_like",
@@ -34,11 +39,44 @@ const PostLike = sequelize.define(
   }
 );
 
-// relations
-Post.hasMany(PostLike, { foreignKey: "post_id", onDelete: "CASCADE" });
-PostLike.belongsTo(Post, { foreignKey: "post_id" });
+/**
+ * Relations (define once)
+ * MSSQL: NO ACTION pe user_id ca să eviți multiple cascade paths
+ */
+if (!PostLike.associations?.Post) {
+  Post.hasMany(PostLike, {
+    foreignKey: "post_id",
+    as: "likes",
+    constraints: true,
+    onDelete: "CASCADE",
+    onUpdate: "CASCADE",
+  });
 
-User.hasMany(PostLike, { foreignKey: "user_id", onDelete: "NO ACTION" });
-PostLike.belongsTo(User, { foreignKey: "user_id" });
+  PostLike.belongsTo(Post, {
+    foreignKey: "post_id",
+    as: "post",
+    constraints: true,
+    onDelete: "CASCADE",
+    onUpdate: "CASCADE",
+  });
+}
+
+if (!PostLike.associations?.User) {
+  User.hasMany(PostLike, {
+    foreignKey: "user_id",
+    as: "post_likes",
+    constraints: true,
+    onDelete: "NO ACTION",
+    onUpdate: "CASCADE",
+  });
+
+  PostLike.belongsTo(User, {
+    foreignKey: "user_id",
+    as: "User",
+    constraints: true,
+    onDelete: "NO ACTION",
+    onUpdate: "CASCADE",
+  });
+}
 
 module.exports = PostLike;

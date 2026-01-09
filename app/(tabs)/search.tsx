@@ -34,10 +34,6 @@ function formatDate(value?: string | null) {
   return d.toLocaleString();
 }
 
-function norm(s?: string | null) {
-  return (s ?? "").toLowerCase().trim();
-}
-
 function getUserId(u: UserItem): number | null {
   const id = Number((u as any)?.id ?? (u as any)?.user_id);
   return Number.isFinite(id) && id > 0 ? id : null;
@@ -54,16 +50,10 @@ function getPostId(p: any): number | null {
 }
 
 /**
- * Încearcă mai multe rute posibile pentru profil.
- * Păstrează doar cea corectă la tine, când știi sigur care e.
+ * ✅ Ruta corectă (din proiectul tău): app/profile/[id].tsx
  */
 function goToUserProfile(userId: number) {
-  // 1) ruta recomandată de tine în codul existent
-  const routes = [`/profile/${userId}`, `/user/${userId}`, `/users/${userId}`];
-
-  // expo-router nu aruncă ușor erori la push, dar dacă o rută nu există vei vedea warning.
-  // În practică, păstrează doar una (cea reală).
-  router.push(routes[0] as any);
+  router.push(`/profile/${userId}` as any);
 }
 
 export default function SearchScreen() {
@@ -270,7 +260,11 @@ export default function SearchScreen() {
                     <View style={{ flex: 1, gap: 4 }}>
                       <ThemedText style={styles.cardTitle}>{displayName}</ThemedText>
                       {!!u.email && <ThemedText style={styles.meta}>{u.email}</ThemedText>}
-                      {!!u.bio && <ThemedText style={styles.cardDesc} numberOfLines={1}>{u.bio}</ThemedText>}
+                      {!!u.bio && (
+                        <ThemedText style={styles.cardDesc} numberOfLines={1}>
+                          {u.bio}
+                        </ThemedText>
+                      )}
                     </View>
                   </Pressable>
                 );
@@ -297,6 +291,7 @@ export default function SearchScreen() {
                     key={`c-${id ?? idx}`}
                     onPress={() => {
                       if (!id) return;
+                      // dacă ai și key capsules: poți decide aici
                       router.push(`/capsule/${id}` as any);
                     }}
                     style={({ pressed }) => [styles.card, pressed && { opacity: 0.95 }]}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -77,11 +77,14 @@ export default function HomeScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string>("");
 
-  // like state local
+  // like state local (MVP)
   const [liked, setLiked] = useState<Record<number, boolean>>({});
   const [busyLike, setBusyLike] = useState<Record<number, boolean>>({});
 
-  const load = useCallback(async () => {
+  // ca să nu spammăm reload pe focus
+  const didFirstLoad = useRef(false);
+
+  const loadAll = useCallback(async () => {
     try {
       setError("");
       setLoading(true);
@@ -90,6 +93,29 @@ export default function HomeScreen() {
       setCapsules(Array.isArray(caps) ? caps : []);
       setPosts(Array.isArray(pst) ? pst : []);
 
+      // init liked map only for new posts (NU resetăm ce a apăsat user-ul)
+      setLiked((prev) => {
+        const next = { ...prev };
+        for (const p of Array.isArray(pst) ? pst : []) {
+          if (next[p.id] === undefined) next[p.id] = false;
+        }
+        return next;
+      });
+    } catch (e: any) {
+      setError("Nu am putut încărca feed-ul. Verifică backend-ul și API URL / token.");
+      setCapsules([]);
+      setPosts([]);
+    } finally {
+      setLoading(false);
+      didFirstLoad.current = true;
+    }
+  }, []);
+
+  // refresh doar la posts (util după like/comment ca să vezi count real din DB)
+  const reloadPostsOnly = useCallback(async () => {
+    try {
+      const pst = await getPosts();
+      setPosts(Array.isArray(pst) ? pst : []);
       setLiked((prev) => {
         const next = { ...prev };
         for (const p of Array.isArray(pst) ? pst : []) {
@@ -98,32 +124,30 @@ export default function HomeScreen() {
         return next;
       });
     } catch {
-      setError("Nu am putut încărca feed-ul. Verifică backend-ul și API URL.");
-      setCapsules([]);
-      setPosts([]);
-    } finally {
-      setLoading(false);
+      // nu blocăm UI, doar ignorăm
     }
   }, []);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    loadAll();
+  }, [loadAll]);
 
   useFocusEffect(
     useCallback(() => {
-      load();
-    }, [load])
+      // evită reload complet la fiecare focus, dar menține feed-ul proaspăt
+      if (!didFirstLoad.current) return;
+      reloadPostsOnly();
+    }, [reloadPostsOnly])
   );
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      await load();
+      await loadAll();
     } finally {
       setRefreshing(false);
     }
-  }, [load]);
+  }, [loadAll]);
 
   const feed: FeedItem[] = useMemo(() => {
     const a: FeedItem[] = [];
@@ -142,23 +166,25 @@ export default function HomeScreen() {
     return a;
   }, [capsules, posts]);
 
-  const makeKeyDeepLink = (capsuleId: number) => {
-    return Linking.createURL(`/capsule/key/${capsuleId}`);
-  };
+  const makeKeyDeepLink = (capsuleId: number) => Linking.createURL(`/capsule/key/${capsuleId}`);
 
   const goToKeyUnlock = (capsuleId: number) => {
     router.push(`/capsule/key/${capsuleId}` as any);
   };
 
   const openComments = (postId: number) => {
-    router.push(`/post/${postId}` as any);
-  };
+  router.push({
+    pathname: "/post/[id]",
+    params: { id: String(postId) },
+  } as any);
+};
 
   const onToggleLike = async (postId: number) => {
     if (busyLike[postId]) return;
 
     const isLiked = !!liked[postId];
 
+    // optimistic UI
     setBusyLike((m) => ({ ...m, [postId]: true }));
     setLiked((m) => ({ ...m, [postId]: !isLiked }));
     setPosts((arr) =>
@@ -172,7 +198,11 @@ export default function HomeScreen() {
     try {
       if (!isLiked) await likePost(postId);
       else await unlikePost(postId);
+
+      // ✅ sincronizează count real din DB (și între useri)
+      await reloadPostsOnly();
     } catch {
+      // revert UI
       setLiked((m) => ({ ...m, [postId]: isLiked }));
       setPosts((arr) =>
         arr.map((p) =>
@@ -219,7 +249,7 @@ export default function HomeScreen() {
             <ThemedText style={styles.errorTitle}>Eroare</ThemedText>
             <ThemedText style={styles.errorText}>{error}</ThemedText>
 
-            <Pressable style={styles.retryBtn} onPress={load}>
+            <Pressable style={styles.retryBtn} onPress={loadAll}>
               <ThemedText style={styles.retryText}>Reîncearcă</ThemedText>
             </Pressable>
           </ThemedView>
@@ -260,7 +290,9 @@ export default function HomeScreen() {
                         <View style={styles.qrCard}>
                           <QRCode value={qrValue} size={140} />
                         </View>
-                        <ThemedText style={styles.qrHint}>Scanează QR-ul sau apasă „Unlock”</ThemedText>
+                        <ThemedText style={styles.qrHint}>
+                          Scanează QR-ul sau apasă „Unlock”
+                        </ThemedText>
                       </View>
                     </View>
                   ) : cover ? (
@@ -289,7 +321,9 @@ export default function HomeScreen() {
                     ) : null}
 
                     <View style={styles.metaRow}>
-                      <ThemedText style={styles.metaText}>Created: {formatDate(c.created_at)}</ThemedText>
+                      <ThemedText style={styles.metaText}>
+                        Created: {formatDate(c.created_at)}
+                      </ThemedText>
 
                       <Pressable
                         onPress={() => {
@@ -298,7 +332,9 @@ export default function HomeScreen() {
                         }}
                         style={({ pressed }) => [styles.openBtn, pressed && { opacity: 0.9 }]}
                       >
-                        <ThemedText style={styles.openBtnText}>{isKey ? "Unlock" : "Open"}</ThemedText>
+                        <ThemedText style={styles.openBtnText}>
+                          {isKey ? "Unlock" : "Open"}
+                        </ThemedText>
                       </Pressable>
                     </View>
                   </View>
@@ -335,7 +371,11 @@ export default function HomeScreen() {
                     onPress={() => onToggleLike(p.id)}
                     style={({ pressed }) => [styles.actionBtn, pressed && { opacity: 0.75 }]}
                   >
-                    <Ionicons name={isLiked ? "heart" : "heart-outline"} size={18} color={isLiked ? "#d64545" : "#111"} />
+                    <Ionicons
+                      name={isLiked ? "heart" : "heart-outline"}
+                      size={18}
+                      color={isLiked ? "#d64545" : "#111"}
+                    />
                     <ThemedText style={styles.actionText}>{likeCount}</ThemedText>
                   </Pressable>
 
