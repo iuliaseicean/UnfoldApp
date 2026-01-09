@@ -14,7 +14,7 @@ import {
 import { useLocalSearchParams, router } from "expo-router";
 import Ionicons from "@expo/vector-icons/Ionicons";
 
-import { getCapsuleById } from "@/lib/capsules";
+import { deleteCapsule, getCapsuleById } from "@/lib/capsules";
 import type { Capsule } from "@/types/capsule";
 import { ThemedText } from "@/components/themed-text";
 import { ThemedView } from "@/components/themed-view";
@@ -49,11 +49,12 @@ export default function CapsuleDetails() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const capsuleId = Number(id);
 
-  const [capsule, setCapsule] = useState<Capsule | null>(null);
+  const [capsule, setCapsule] = useState<(Capsule & { canDelete?: boolean; isMine?: boolean }) | null>(null);
   const [contributions, setContributions] = useState<CapsuleContribution[]>([]);
   const [co, setCo] = useState<CoMeta | null>(null);
 
   const [loading, setLoading] = useState(true);
+  const [busyDelete, setBusyDelete] = useState(false);
 
   const loadCapsule = useCallback(async () => {
     if (!capsuleId) return;
@@ -64,7 +65,7 @@ export default function CapsuleDetails() {
       setCapsule(data?.capsule ?? null);
       setContributions(Array.isArray(data?.contributions) ? data.contributions : []);
       setCo(data?.co ?? null);
-    } catch (e: any) {
+    } catch {
       setCapsule(null);
       setContributions([]);
       setCo(null);
@@ -84,10 +85,7 @@ export default function CapsuleDetails() {
     return anyCapsule?.cover_url || anyCapsule?.media_url || null;
   }, [capsule]);
 
-  const imageContribs = useMemo(
-    () => contributions.filter((c) => !!c?.media_url),
-    [contributions]
-  );
+  const imageContribs = useMemo(() => contributions.filter((c) => !!c?.media_url), [contributions]);
 
   const canContribute = useMemo(() => {
     if (!isCo) return false;
@@ -111,6 +109,43 @@ export default function CapsuleDetails() {
     } as any);
   };
 
+  const canDelete = useMemo(() => {
+    return !!(capsule as any)?.canDelete || !!(capsule as any)?.isMine;
+  }, [capsule]);
+
+  const onDelete = useCallback(() => {
+    if (!capsuleId || busyDelete) return;
+
+    Alert.alert(
+      "Șterge capsula?",
+      "Acțiunea este permanentă. Se șterg și contribuțiile/cheia asociată.",
+      [
+        { text: "Anulează", style: "cancel" },
+        {
+          text: "Șterge",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              setBusyDelete(true);
+              await deleteCapsule(capsuleId);
+              Alert.alert("Șters", "Capsula a fost ștearsă.");
+              router.replace("/(tabs)/home");
+            } catch (e: any) {
+              const msg =
+                e?.response?.data?.error ||
+                e?.response?.data?.message ||
+                e?.message ||
+                "Nu am putut șterge capsula.";
+              Alert.alert("Eroare", msg);
+            } finally {
+              setBusyDelete(false);
+            }
+          },
+        },
+      ]
+    );
+  }, [capsuleId, busyDelete]);
+
   return (
     <ImageBackground source={BG} style={{ flex: 1 }}>
       {/* Header */}
@@ -118,8 +153,16 @@ export default function CapsuleDetails() {
         <Pressable onPress={() => router.back()} style={styles.backBtn}>
           <Ionicons name="chevron-back" size={22} color="#111" />
         </Pressable>
+
         <ThemedText style={styles.headerTitle}>Capsule</ThemedText>
-        <View style={{ width: 40 }} />
+
+        {canDelete ? (
+          <Pressable onPress={onDelete} disabled={busyDelete} style={[styles.trashBtn, busyDelete && { opacity: 0.6 }]}>
+            <Ionicons name="trash-outline" size={18} color="#111" />
+          </Pressable>
+        ) : (
+          <View style={{ width: 40 }} />
+        )}
       </View>
 
       <ScrollView
@@ -169,10 +212,7 @@ export default function CapsuleDetails() {
                 ) : null}
 
                 {canContribute ? (
-                  <Pressable
-                    onPress={openCoContribute}
-                    style={({ pressed }) => [styles.plusBtn, pressed && { opacity: 0.9 }]}
-                  >
+                  <Pressable onPress={openCoContribute} style={({ pressed }) => [styles.plusBtn, pressed && { opacity: 0.9 }]}>
                     <Ionicons name="add" size={18} color="#111" />
                     <ThemedText style={styles.plusBtnText}>Add contribution</ThemedText>
                   </Pressable>
@@ -208,13 +248,10 @@ export default function CapsuleDetails() {
 
                 {/* LISTĂ */}
                 {contributions.map((c, idx) => {
-                  const author =
-                    c?.User?.username || c?.User?.name || c?.User?.email || "User";
+                  const author = c?.User?.username || c?.User?.name || c?.User?.email || "User";
                   return (
                     <ThemedView key={c.id ?? idx} style={styles.contribution}>
-                      <ThemedText style={[styles.contributionAuthor, styles.textDark]}>
-                        {author}
-                      </ThemedText>
+                      <ThemedText style={[styles.contributionAuthor, styles.textDark]}>{author}</ThemedText>
 
                       {!!c?.content_text && (
                         <ThemedText style={[styles.contributionText, styles.textDark]}>
@@ -272,6 +309,14 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(0,0,0,0.06)",
   },
   headerTitle: { fontSize: 16, fontWeight: "800", color: "#111" },
+  trashBtn: {
+    width: 40,
+    height: 36,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 12,
+    backgroundColor: "rgba(0,0,0,0.06)",
+  },
 
   container: { padding: 16, paddingBottom: 28 },
   center: { marginTop: 40, alignItems: "center" },

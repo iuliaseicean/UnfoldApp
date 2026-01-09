@@ -9,6 +9,8 @@ const User = require("../models/User");
 const CapsuleContribution = require("../models/CapsuleContribution");
 const CapsuleKey = require("../models/CapsuleKey");
 
+const { sequelize } = require("../config/db");
+
 const {
   refreshCapsuleStatus,
   canUserViewCapsule,
@@ -23,6 +25,33 @@ const {
  */
 function hasAttr(model, name) {
   return !!model?.rawAttributes?.[name];
+}
+
+function getAuthUserId(req) {
+  return req.user?.id ?? req.user?.user_id ?? null;
+}
+
+function toId(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * PK pentru Capsule (capsule_id / id)
+ */
+function getCapsulePkField() {
+  if (hasAttr(Capsule, "capsule_id")) return "capsule_id";
+  if (hasAttr(Capsule, "id")) return "id";
+  return Capsule.primaryKeyAttribute || "id";
+}
+
+/**
+ * Owner field pentru Capsule (creator_id / creatorId)
+ */
+function getCapsuleOwnerField() {
+  if (hasAttr(Capsule, "creator_id")) return "creator_id";
+  if (hasAttr(Capsule, "creatorId")) return "creatorId";
+  return "creator_id";
 }
 
 /**
@@ -85,21 +114,17 @@ function getSafeUserAttrs() {
   return safe.length ? safe : undefined;
 }
 
-function getAuthUserId(req) {
-  return req.user?.id ?? req.user?.user_id ?? null;
-}
-
-function toId(v) {
-  const n = Number(v);
-  return Number.isFinite(n) && n > 0 ? n : null;
-}
-
 /**
  * Enrich pentru key meta (qr/exp/has_key)
  */
 async function enrichWithKeyMeta(req, capsules) {
   const arr = Array.isArray(capsules) ? capsules : [];
-  const ids = arr.map((c) => c?.capsule_id).filter(Boolean);
+  const ids = arr
+    .map((c) => {
+      const row = typeof c?.toJSON === "function" ? c.toJSON() : c;
+      return row?.capsule_id ?? row?.id;
+    })
+    .filter(Boolean);
 
   const keys = ids.length
     ? await CapsuleKey.findAll({
@@ -109,15 +134,16 @@ async function enrichWithKeyMeta(req, capsules) {
       })
     : [];
 
-  const keyMap = new Map(keys.map((k) => [k.capsule_id, k]));
+  const keyMap = new Map(keys.map((k) => [Number(k.capsule_id), k]));
 
   return arr.map((c) => {
     const row = typeof c?.toJSON === "function" ? c.toJSON() : c;
-    const keyRow = keyMap.get(row.capsule_id);
+    const cid = Number(row.capsule_id ?? row.id);
+    const keyRow = keyMap.get(cid);
 
     return {
       ...row,
-      qr_payload: row.capsule_type === "key" ? qrPayloadForCapsule(req, row.capsule_id) : null,
+      qr_payload: row.capsule_type === "key" ? qrPayloadForCapsule(req, cid) : null,
       key_expires_at: keyRow?.expires_at || null,
       has_key: !!keyRow,
     };
@@ -132,7 +158,10 @@ async function enrichWithKeyMeta(req, capsules) {
  */
 async function enrichWithCoMeta(capsules, userId) {
   const arr = Array.isArray(capsules) ? capsules : [];
-  const coCaps = arr.filter((c) => (c?.capsule_type ?? c?.toJSON?.()?.capsule_type) === "co");
+  const coCaps = arr.filter((c) => {
+    const row = typeof c?.toJSON === "function" ? c.toJSON() : c;
+    return row?.capsule_type === "co";
+  });
 
   if (!coCaps.length) {
     return arr.map((c) => ({
@@ -144,7 +173,10 @@ async function enrichWithCoMeta(capsules, userId) {
   }
 
   const coIds = coCaps
-    .map((c) => (typeof c?.toJSON === "function" ? c.toJSON().capsule_id : c.capsule_id))
+    .map((c) => {
+      const row = typeof c?.toJSON === "function" ? c.toJSON() : c;
+      return Number(row.capsule_id ?? row.id);
+    })
     .filter(Boolean);
 
   // 1) contributorsCount per capsule (unique contributors)
@@ -173,10 +205,10 @@ async function enrichWithCoMeta(capsules, userId) {
     }
 
     const required = Number(row.required_contributors || 0);
-    const cnt = Number(counts.get(Number(row.capsule_id)) || 0);
+    const cnt = Number(counts.get(Number(row.capsule_id ?? row.id)) || 0);
 
     const isFull = required > 0 ? cnt >= required : false;
-    const already = contributedSet.has(Number(row.capsule_id));
+    const already = contributedSet.has(Number(row.capsule_id ?? row.id));
 
     const canContribute =
       !already &&
@@ -190,6 +222,23 @@ async function enrichWithCoMeta(capsules, userId) {
       contributorsCount: cnt,
       isFull,
       canContribute,
+    };
+  });
+}
+
+/**
+ * ✅ Enrich pentru "canDelete" (doar creatorul capsulei)
+ */
+function enrichWithCanDelete(capsules, userId) {
+  const arr = Array.isArray(capsules) ? capsules : [];
+  const ownerField = getCapsuleOwnerField();
+
+  return arr.map((c) => {
+    const row = typeof c?.toJSON === "function" ? c.toJSON() : c;
+    const ownerId = Number(row?.[ownerField]);
+    return {
+      ...row,
+      canDelete: !!userId && ownerId === Number(userId),
     };
   });
 }
@@ -211,18 +260,16 @@ async function prepareListForUser(req, list, userId) {
   // enrich meta
   const withKey = await enrichWithKeyMeta(req, allowed);
   const withCo = await enrichWithCoMeta(withKey, userId);
-  return withCo;
+  const withDelete = enrichWithCanDelete(withCo, userId);
+  return withDelete;
 }
 
 // ─────────────────────────────────────────────
-// IMPORTANT: rutele "statice" (ex: /search, /my) trebuie
-// să fie ÎNAINTE de "/:id" ca să nu intre în conflict.
+// IMPORTANT: rutele "statice" (/search, /my) înainte de "/:id"
 // ─────────────────────────────────────────────
 
-// ─────────────────────────────────────────────
 // SEARCH capsules
 // GET /capsules/search?q=...
-// ─────────────────────────────────────────────
 router.get("/search", auth, async (req, res, next) => {
   try {
     const q = String(req.query.q || "").trim();
@@ -231,7 +278,6 @@ router.get("/search", auth, async (req, res, next) => {
     const userId = getAuthUserId(req);
     if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
-    // coloane existente
     const attrs = Capsule?.rawAttributes || {};
     const whereOr = [];
     if (attrs.title) whereOr.push({ title: { [Op.like]: `%${q}%` } });
@@ -252,10 +298,8 @@ router.get("/search", auth, async (req, res, next) => {
   }
 });
 
-// ─────────────────────────────────────────────
 // CREATE capsule (TIME/CO/KEY)
 // POST /capsules
-// ─────────────────────────────────────────────
 router.post("/", auth, async (req, res, next) => {
   try {
     const {
@@ -303,6 +347,7 @@ router.post("/", auth, async (req, res, next) => {
 
     const capsulePayload = pickModelFields(Capsule, {
       creator_id: userId,
+      creatorId: userId,
       title,
       description,
       capsule_type,
@@ -311,20 +356,18 @@ router.post("/", auth, async (req, res, next) => {
       required_contributors: required_contributors != null ? Number(required_contributors) : null,
       status: "locked",
 
-      // ✅ dacă modelul are cover_url/media_url, le salvăm
       cover_url: cover_url || media_url || null,
       media_url: media_url || cover_url || null,
     });
 
     const created = await Capsule.create(capsulePayload);
 
-    // ✅ pentru CO: creatorul devine primul contributor (poza de cover devine contribuția lui)
+    // CO: creatorul devine primul contributor (poza de cover devine contribuția lui)
     if (capsule_type === "co") {
       const firstMedia = String(media_url || cover_url || "").trim() || null;
-
       if (firstMedia) {
         await CapsuleContribution.create({
-          capsule_id: created.capsule_id,
+          capsule_id: created.capsule_id ?? created.id,
           user_id: userId,
           content_text: null,
           media_url: firstMedia,
@@ -352,25 +395,25 @@ router.post("/", auth, async (req, res, next) => {
         qr_payload: qrPayloadForCapsule(req, created.capsule_id),
         key_expires_at: expiresAt || null,
         has_key: true,
+        canDelete: true,
       });
     }
 
-    // ✅ return co meta și la create (ca să vezi imediat progresul)
     if (capsule_type === "co") {
       const enriched = await enrichWithCoMeta([created], userId);
-      return res.status(201).json(enriched[0]);
+      const withDelete = enrichWithCanDelete(enriched, userId);
+      return res.status(201).json(withDelete[0]);
     }
 
-    return res.status(201).json(created);
+    // default
+    return res.status(201).json({ ...created.toJSON(), canDelete: true });
   } catch (e) {
     next(e);
   }
 });
 
-// ─────────────────────────────────────────────
 // LIST my capsules
 // GET /capsules/my
-// ─────────────────────────────────────────────
 router.get("/my", auth, async (req, res, next) => {
   try {
     const userId = getAuthUserId(req);
@@ -388,10 +431,8 @@ router.get("/my", auth, async (req, res, next) => {
   }
 });
 
-// ─────────────────────────────────────────────
 // LIST all capsules (feed helper)
 // GET /capsules
-// ─────────────────────────────────────────────
 router.get("/", auth, async (req, res, next) => {
   try {
     const userId = getAuthUserId(req);
@@ -411,10 +452,57 @@ router.get("/", auth, async (req, res, next) => {
   }
 });
 
-// ─────────────────────────────────────────────
+// ✅ DELETE capsule (doar creatorul)
+// DELETE /capsules/:id
+router.delete("/:id", auth, async (req, res, next) => {
+  const t = await sequelize.transaction();
+  try {
+    const id = toId(req.params.id);
+    if (!id) {
+      await t.rollback();
+      return res.status(400).json({ error: "Invalid capsule id" });
+    }
+
+    const userId = getAuthUserId(req);
+    if (!userId) {
+      await t.rollback();
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const capsule = await Capsule.findByPk(id, { transaction: t });
+    if (!capsule) {
+      await t.rollback();
+      return res.status(404).json({ error: "Capsule not found" });
+    }
+
+    const ownerField = getCapsuleOwnerField();
+    const ownerId = Number(capsule?.get?.(ownerField) ?? capsule?.[ownerField]);
+
+    if (ownerId !== Number(userId)) {
+      await t.rollback();
+      return res.status(403).json({ error: "You can delete only your capsules" });
+    }
+
+    const cid = Number(capsule?.get?.(getCapsulePkField()) ?? capsule?.[getCapsulePkField()] ?? id);
+
+    // ștergem dependențele
+    await CapsuleContribution.destroy({ where: { capsule_id: cid }, transaction: t });
+    await CapsuleKey.destroy({ where: { capsule_id: cid }, transaction: t });
+
+    // ștergem capsula
+    const pk = getCapsulePkField();
+    await Capsule.destroy({ where: { [pk]: cid }, transaction: t });
+
+    await t.commit();
+    return res.json({ ok: true });
+  } catch (e) {
+    await t.rollback();
+    next(e);
+  }
+});
+
 // GET capsule details (+ contributions if allowed)
 // GET /capsules/:id
-// ─────────────────────────────────────────────
 router.get("/:id", auth, async (req, res, next) => {
   try {
     const id = toId(req.params.id);
@@ -462,7 +550,7 @@ router.get("/:id", auth, async (req, res, next) => {
       };
     }
 
-    // ✅ CO meta și pe details
+    // CO meta și pe details
     let coMeta = null;
     if (capsule.capsule_type === "co") {
       const enriched = await enrichWithCoMeta([capsule], userId);
@@ -475,8 +563,13 @@ router.get("/:id", auth, async (req, res, next) => {
       };
     }
 
+    // ✅ canDelete pe details
+    const ownerField = getCapsuleOwnerField();
+    const ownerId = Number(capsule?.get?.(ownerField) ?? capsule?.[ownerField]);
+    const canDelete = ownerId === Number(userId);
+
     return res.json({
-      capsule,
+      capsule: { ...(typeof capsule?.toJSON === "function" ? capsule.toJSON() : capsule), canDelete },
       contributions,
       uniqueContributors,
       key: keyMeta,
@@ -487,10 +580,8 @@ router.get("/:id", auth, async (req, res, next) => {
   }
 });
 
-// ─────────────────────────────────────────────
 // UNLOCK key capsule
 // POST /capsules/:id/unlock { key: "..." }
-// ─────────────────────────────────────────────
 router.post("/:id/unlock", auth, async (req, res, next) => {
   try {
     const id = toId(req.params.id);
@@ -526,10 +617,8 @@ router.post("/:id/unlock", auth, async (req, res, next) => {
   }
 });
 
-// ─────────────────────────────────────────────
 // ADD contribution
 // POST /capsules/:id/contributions
-// ─────────────────────────────────────────────
 router.post("/:id/contributions", auth, async (req, res, next) => {
   try {
     const id = toId(req.params.id);
@@ -550,7 +639,7 @@ router.post("/:id/contributions", auth, async (req, res, next) => {
     const allowed = await canUserViewCapsule(capsule, userId);
     if (!allowed) return res.status(403).json({ error: "No access to this capsule" });
 
-    // ✅ CO rules: dacă e co și e full sau user a contribuit deja -> blocăm
+    // CO rules: dacă e co și e full sau user a contribuit deja -> blocăm
     if (capsule.capsule_type === "co") {
       const required = Number(capsule.required_contributors || 0);
       const cnt = await getUniqueContributorsCount(capsule.capsule_id);
@@ -584,10 +673,8 @@ router.post("/:id/contributions", auth, async (req, res, next) => {
   }
 });
 
-// ─────────────────────────────────────────────
 // TRY OPEN capsule
 // POST /capsules/:id/open
-// ─────────────────────────────────────────────
 router.post("/:id/open", auth, async (req, res, next) => {
   try {
     const id = toId(req.params.id);
@@ -620,10 +707,8 @@ router.post("/:id/open", auth, async (req, res, next) => {
   }
 });
 
-// ─────────────────────────────────────────────
 // GENERATE KEY (owner)
 // POST /capsules/:id/generate-key
-// ─────────────────────────────────────────────
 router.post("/:id/generate-key", auth, async (req, res, next) => {
   try {
     const id = toId(req.params.id);
@@ -660,10 +745,8 @@ router.post("/:id/generate-key", auth, async (req, res, next) => {
   }
 });
 
-// ─────────────────────────────────────────────
 // JOIN WITH KEY
 // POST /capsules/:id/join-with-key
-// ─────────────────────────────────────────────
 router.post("/:id/join-with-key", auth, async (req, res, next) => {
   try {
     const id = toId(req.params.id);

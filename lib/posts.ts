@@ -22,6 +22,14 @@ export type PostItem = {
   commentCount: number;
 
   User?: PostUser;
+
+  /**
+   * ✅ Delete permissions (din backend, dacă există)
+   * - canDelete: backend spune clar că user-ul curent poate șterge postarea
+   * - isMine: helper (în UI) - true dacă postarea e a mea
+   */
+  canDelete?: boolean;
+  isMine?: boolean;
 };
 
 export type PostCommentItem = {
@@ -68,25 +76,48 @@ function mapUser(u: any): PostUser | undefined {
   };
 }
 
+/**
+ * ✅ mapPost:
+ * - suportă id / post_id
+ * - suportă user_id / userId
+ * - suportă content_text / contentText
+ * - suportă media_url / mediaUrl
+ * - preia canDelete dacă backend-ul îl oferă
+ */
 function mapPost(p: any): PostItem {
   const id = Number(p?.id ?? p?.post_id ?? 0);
+  const user_id = Number(p?.user_id ?? p?.userId ?? 0);
+
+  const created_at = p?.created_at
+    ? toIso(p.created_at)
+    : p?.createdAt
+    ? toIso(p.createdAt)
+    : new Date().toISOString();
+
+  const canDelete =
+    typeof p?.canDelete === "boolean"
+      ? p.canDelete
+      : typeof p?.can_delete === "boolean"
+      ? p.can_delete
+      : undefined;
 
   return {
     id,
-    user_id: Number(p?.user_id ?? p?.userId ?? 0),
+    user_id,
     content_text: String(p?.content_text ?? p?.contentText ?? ""),
     media_url: p?.media_url ?? p?.mediaUrl ?? null,
     visibility: String(p?.visibility ?? "public"),
-    created_at: p?.created_at
-      ? toIso(p.created_at)
-      : p?.createdAt
-      ? toIso(p.createdAt)
-      : new Date().toISOString(),
+    created_at,
 
     likeCount: Number(p?.likeCount ?? 0),
     commentCount: Number(p?.commentCount ?? 0),
 
     User: mapUser(p?.User),
+
+    canDelete,
+    // isMine rămâne undefined aici (nu știm user-ul curent în lib),
+    // dar UI-ul îl poate seta dacă are userId local.
+    isMine: typeof p?.isMine === "boolean" ? p.isMine : undefined,
   };
 }
 
@@ -96,11 +127,7 @@ function mapComment(c: any, fallbackPostId?: number): PostCommentItem {
     post_id: Number(c?.post_id ?? c?.postId ?? fallbackPostId ?? 0),
     user_id: Number(c?.user_id ?? c?.userId ?? 0),
     content_text: String(c?.content_text ?? c?.contentText ?? ""),
-    created_at: c?.created_at
-      ? toIso(c.created_at)
-      : c?.createdAt
-      ? toIso(c.createdAt)
-      : new Date().toISOString(),
+    created_at: c?.created_at ? toIso(c.created_at) : c?.createdAt ? toIso(c.createdAt) : new Date().toISOString(),
     User: mapUser(c?.User),
   };
 }
@@ -177,7 +204,10 @@ export async function getPostComments(postId: number): Promise<PostCommentItem[]
 
 export async function addPostComment(postId: number, content_text: string): Promise<PostCommentItem> {
   const res = await api.post(`/content/posts/${postId}/comments`, { content_text });
-  return mapComment(res.data, postId);
+
+  // uneori backend-ul întoarce { comment, likeCount, commentCount }
+  const payload = res.data?.comment ?? res.data;
+  return mapComment(payload, postId);
 }
 
 /**
@@ -189,7 +219,6 @@ export async function getPostsByUserId(userId: number): Promise<PostItem[]> {
   const id = Number(userId);
   if (!Number.isFinite(id) || id <= 0) return [];
 
-  // 1) endpoint dedicat
   try {
     const res = await api.get(`/users/${id}/posts`);
     const arr = pickArr(res.data);
@@ -197,7 +226,6 @@ export async function getPostsByUserId(userId: number): Promise<PostItem[]> {
   } catch (e: any) {
     const status = e?.response?.status;
 
-    // 404 -> fallback local
     if (status === 404) {
       const all = await getPosts();
       return all.filter((p) => Number(p.user_id) === id);
@@ -208,11 +236,14 @@ export async function getPostsByUserId(userId: number): Promise<PostItem[]> {
 }
 
 /**
- * ✅ (optional) Delete post
- * Backend recomandat: DELETE /content/posts/:id
+ * ✅ Delete post (doar owner - backend trebuie să verifice)
+ * Backend: DELETE /content/posts/:id
  */
-export async function deletePost(postId: number) {
-  const res = await api.delete(`/content/posts/${postId}`);
+export async function deletePost(postId: number): Promise<{ ok?: boolean }> {
+  const id = Number(postId);
+  if (!Number.isFinite(id) || id <= 0) throw new Error("Invalid postId");
+
+  const res = await api.delete(`/content/posts/${id}`);
   return res.data;
 }
 
@@ -225,7 +256,6 @@ export async function searchPosts(q: string): Promise<PostItem[]> {
   const query = String(q || "").trim();
   if (!query) return [];
 
-  // 1) endpoint dedicat
   try {
     const res = await api.get("/content/posts/search", { params: { q: query } });
     const arr = pickArr(res.data);
@@ -233,7 +263,6 @@ export async function searchPosts(q: string): Promise<PostItem[]> {
   } catch (e: any) {
     const status = e?.response?.status;
 
-    // 404 -> fallback local
     if (status === 404) {
       const all = await getPosts();
       const low = query.toLowerCase();
