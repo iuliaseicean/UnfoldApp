@@ -1,4 +1,6 @@
+// backend/src/index.js
 require("dotenv").config();
+
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
@@ -8,28 +10,33 @@ const path = require("path");
 
 const { connectDB, sequelize } = require("./config/db");
 
-// Import modele ca să înregistreze asocierile
+// ─────────────────────────────────────────────
+// Import modele (ca să înregistreze asocierile)
+// ─────────────────────────────────────────────
 require("./models/User");
 require("./models/Content");
+
+// capsule models
 require("./models/Capsule");
 require("./models/CapsuleContribution");
 require("./models/CapsuleKey");
 require("./models/CapsuleAccess");
+
+// post models
+require("./models/Post");
 require("./models/PostLike");
 require("./models/PostComment");
 
 const app = express();
 
-// IMPORTANT pt ngrok / reverse proxy
+// IMPORTANT pentru ngrok / reverse proxy
 app.set("trust proxy", 1);
 
-// ── Middleware de bază
+// ─────────────────────────────────────────────
+// Middleware de bază
+// ─────────────────────────────────────────────
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
-
-// (dacă nu folosești încă routes astea, le poți comenta)
-// app.use("/users", require("./routes/users.routes"));
-// app.use("/feed", require("./routes/feed.routes"));
 
 app.use(
   cors({
@@ -38,7 +45,13 @@ app.use(
   })
 );
 
-app.use(helmet());
+// Helmet: permite încărcarea imaginilor / QR / uploads cross-origin
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  })
+);
+
 app.use(morgan("dev"));
 
 app.use(
@@ -50,40 +63,55 @@ app.use(
   })
 );
 
-// ✅ STATIC uploads
-// index.js este în backend/src, iar folderul este backend/uploads
+// ─────────────────────────────────────────────
+// Static uploads
+// index.js este în backend/src, folderul uploads e în backend/uploads
+// URL: http://localhost:4000/uploads/<file>
+// ─────────────────────────────────────────────
 app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
 
 // Healthcheck
 app.get("/", (_req, res) => res.send("✅ Unfold API (SQL Server) is running"));
 
+// ─────────────────────────────────────────────
 // Rute
+// ─────────────────────────────────────────────
 app.use("/auth", require("./routes/auth.routes"));
 app.use("/content", require("./routes/content.routes"));
 app.use("/capsules", require("./routes/capsules.routes"));
 app.use("/upload", require("./routes/upload.routes"));
+app.use("/users", require("./routes/users.routes"));
 
-// Handler global erori (după rute)
+// Handler global de erori (după rute)
 app.use(require("./middlewares/error"));
 
-// ── Bootstrap aplicație
+// ─────────────────────────────────────────────
+// Bootstrap aplicație
+// ─────────────────────────────────────────────
 (async () => {
   try {
     await connectDB();
 
+    // IMPORTANT:
+    // Fără acces la DB, nu te baza pe sync ca să creezi tabele noi.
+    // Rulează sync doar dacă DB_SYNC=true.
     if (String(process.env.DB_SYNC || "").toLowerCase() === "true") {
-      await sequelize.sync();
+      await sequelize.sync({ alter: false });
       console.log("📊 Tables synchronized (DB_SYNC=true)");
     } else {
       console.log("ℹ Skipping sequelize.sync() (DB_SYNC is not true)");
     }
 
-    const PORT = process.env.PORT || 4000;
+    const PORT = Number(process.env.PORT || 4000);
 
-    // ✅ ascultă pe toate interfețele (telefonul poate accesa via IP)
     app.listen(PORT, "0.0.0.0", () => {
-      const appUrl = process.env.APP_URL || `http://<YOUR_LAN_IP>:${PORT}`;
-      console.log(`🚀 Server listening on ${appUrl}`);
+      console.log(`🚀 Server running on http://localhost:${PORT}`);
+
+      if (process.env.APP_URL) {
+        console.log(`🌍 APP_URL = ${process.env.APP_URL}`);
+      } else {
+        console.log("ℹ Setează APP_URL în .env (pt QR / ngrok), ex: https://xxxx.ngrok-free.app");
+      }
     });
   } catch (err) {
     console.error("❌ Fatal startup error:", err);
