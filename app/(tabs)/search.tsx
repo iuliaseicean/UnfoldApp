@@ -38,6 +38,34 @@ function norm(s?: string | null) {
   return (s ?? "").toLowerCase().trim();
 }
 
+function getUserId(u: UserItem): number | null {
+  const id = Number((u as any)?.id ?? (u as any)?.user_id);
+  return Number.isFinite(id) && id > 0 ? id : null;
+}
+
+function getCapsuleId(c: any): number | null {
+  const id = Number(c?.capsule_id ?? c?.id);
+  return Number.isFinite(id) && id > 0 ? id : null;
+}
+
+function getPostId(p: any): number | null {
+  const id = Number(p?.id ?? p?.post_id);
+  return Number.isFinite(id) && id > 0 ? id : null;
+}
+
+/**
+ * Încearcă mai multe rute posibile pentru profil.
+ * Păstrează doar cea corectă la tine, când știi sigur care e.
+ */
+function goToUserProfile(userId: number) {
+  // 1) ruta recomandată de tine în codul existent
+  const routes = [`/profile/${userId}`, `/user/${userId}`, `/users/${userId}`];
+
+  // expo-router nu aruncă ușor erori la push, dar dacă o rută nu există vei vedea warning.
+  // În practică, păstrează doar una (cea reală).
+  router.push(routes[0] as any);
+}
+
 export default function SearchScreen() {
   const [q, setQ] = useState("");
 
@@ -57,21 +85,30 @@ export default function SearchScreen() {
 
   const query = useMemo(() => q.trim(), [q]);
 
-  // debounce
+  // debounce timer
   const timerRef = useRef<any>(null);
+
+  // request guard: ca să nu scrie rezultate vechi peste cele noi
+  const reqIdRef = useRef(0);
+
+  const clearAll = useCallback(() => {
+    setUsers([]);
+    setCapsules([]);
+    setPosts([]);
+    setErrUsers("");
+    setErrCaps("");
+    setErrPosts("");
+  }, []);
 
   const runSearch = useCallback(
     async (forcedQuery?: string) => {
       const qq = (forcedQuery ?? query).trim();
 
-      // dacă e gol, resetăm tot (nu căutăm)
+      // incrementează request id
+      const myReqId = ++reqIdRef.current;
+
       if (!qq) {
-        setUsers([]);
-        setCapsules([]);
-        setPosts([]);
-        setErrUsers("");
-        setErrCaps("");
-        setErrPosts("");
+        clearAll();
         return;
       }
 
@@ -79,7 +116,6 @@ export default function SearchScreen() {
       setErrCaps("");
       setErrPosts("");
 
-      // pornește cele 3 căutări în paralel
       setLoadingUsers(true);
       setLoadingCapsules(true);
       setLoadingPosts(true);
@@ -90,6 +126,9 @@ export default function SearchScreen() {
           searchCapsules(qq),
           searchPosts(qq),
         ]);
+
+        // dacă între timp s-a pornit alt search, ignorăm rezultatele
+        if (myReqId !== reqIdRef.current) return;
 
         if (u.status === "fulfilled") setUsers(Array.isArray(u.value) ? u.value : []);
         else {
@@ -109,15 +148,18 @@ export default function SearchScreen() {
           setErrPosts("Nu am putut încărca postările.");
         }
       } finally {
-        setLoadingUsers(false);
-        setLoadingCapsules(false);
-        setLoadingPosts(false);
+        // doar dacă request-ul e încă “curent”
+        if (myReqId === reqIdRef.current) {
+          setLoadingUsers(false);
+          setLoadingCapsules(false);
+          setLoadingPosts(false);
+        }
       }
     },
-    [query]
+    [query, clearAll]
   );
 
-  // rulează search cu debounce când se schimbă query
+  // debounce când se schimbă query
   useEffect(() => {
     if (timerRef.current) clearTimeout(timerRef.current);
 
@@ -138,6 +180,7 @@ export default function SearchScreen() {
   );
 
   const onRefresh = useCallback(async () => {
+    if (!query) return;
     setRefreshing(true);
     try {
       await runSearch(query);
@@ -152,7 +195,9 @@ export default function SearchScreen() {
     <ImageBackground source={BG} style={{ flex: 1 }}>
       <ScrollView
         contentContainerStyle={styles.container}
-        refreshControl={<RefreshControl refreshing={refreshing || anyLoading} onRefresh={onRefresh} />}
+        refreshControl={
+          <RefreshControl refreshing={refreshing || anyLoading} onRefresh={onRefresh} />
+        }
         keyboardShouldPersistTaps="handled"
       >
         <View style={styles.header}>
@@ -171,10 +216,15 @@ export default function SearchScreen() {
             style={styles.input}
             autoCapitalize="none"
             autoCorrect={false}
+            returnKeyType="search"
+            onSubmitEditing={() => runSearch(query)}
           />
           {!!q && (
             <Pressable
-              onPress={() => setQ("")}
+              onPress={() => {
+                setQ("");
+                clearAll();
+              }}
               style={({ pressed }) => [styles.clearBtn, pressed && { opacity: 0.85 }]}
             >
               <ThemedText style={styles.clearText}>×</ThemedText>
@@ -200,24 +250,27 @@ export default function SearchScreen() {
               users.map((u, idx) => {
                 const displayName =
                   (u.username?.trim() || u.name?.trim() || u.email?.trim() || "User").trim();
-                const id = (u.id ?? u.user_id) as any;
+                const userId = getUserId(u);
 
                 return (
                   <Pressable
-                    key={`u-${id ?? idx}`}
+                    key={`u-${userId ?? idx}`}
                     onPress={() => {
-                      // 🔁 schimbă ruta dacă la tine e alta
-                      if (id != null) router.push(`/profile/${id}` as any);
+                      if (!userId) return;
+                      goToUserProfile(userId);
                     }}
                     style={({ pressed }) => [styles.card, pressed && { opacity: 0.95 }]}
                   >
                     <View style={styles.userAvatar}>
-                      <ThemedText style={styles.userAvatarText}>{displayName[0]?.toUpperCase()}</ThemedText>
+                      <ThemedText style={styles.userAvatarText}>
+                        {displayName[0]?.toUpperCase() ?? "U"}
+                      </ThemedText>
                     </View>
 
                     <View style={{ flex: 1, gap: 4 }}>
                       <ThemedText style={styles.cardTitle}>{displayName}</ThemedText>
                       {!!u.email && <ThemedText style={styles.meta}>{u.email}</ThemedText>}
+                      {!!u.bio && <ThemedText style={styles.cardDesc} numberOfLines={1}>{u.bio}</ThemedText>}
                     </View>
                   </Pressable>
                 );
@@ -233,15 +286,19 @@ export default function SearchScreen() {
             ) : capsules.length === 0 ? (
               <ThemedText style={styles.empty}>Nu am găsit capsule.</ThemedText>
             ) : (
-              capsules.map((c: any) => {
+              capsules.map((c: any, idx: number) => {
                 const cover = c.cover_url || c.media_url || null;
                 const title = (c.title ?? "").trim() || "Untitled capsule";
                 const desc = (c.description ?? "").trim();
+                const id = getCapsuleId(c);
 
                 return (
                   <Pressable
-                    key={`c-${c.capsule_id}`}
-                    onPress={() => router.push(`/capsule/${c.capsule_id}` as any)}
+                    key={`c-${id ?? idx}`}
+                    onPress={() => {
+                      if (!id) return;
+                      router.push(`/capsule/${id}` as any);
+                    }}
                     style={({ pressed }) => [styles.card, pressed && { opacity: 0.95 }]}
                   >
                     {!!cover && (
@@ -258,7 +315,8 @@ export default function SearchScreen() {
                         </ThemedText>
                       )}
                       <ThemedText style={styles.meta}>
-                        {c.capsule_type || "capsule"} • {formatDate(c.created_at || c.open_at)}
+                        {(c.capsule_type || "capsule") as string} •{" "}
+                        {formatDate(c.created_at || c.open_at)}
                       </ThemedText>
                     </View>
                   </Pressable>
@@ -275,14 +333,18 @@ export default function SearchScreen() {
             ) : posts.length === 0 ? (
               <ThemedText style={styles.empty}>Nu am găsit postări.</ThemedText>
             ) : (
-              posts.map((p: any) => {
+              posts.map((p: any, idx: number) => {
                 const img = p.media_url || p.mediaUrl || null;
                 const author = p.User?.username || p.User?.name || "User";
+                const id = getPostId(p);
 
                 return (
                   <Pressable
-                    key={`p-${p.id}`}
-                    onPress={() => router.push(`/post/${p.id}` as any)}
+                    key={`p-${id ?? idx}`}
+                    onPress={() => {
+                      if (!id) return;
+                      router.push(`/post/${id}` as any);
+                    }}
                     style={({ pressed }) => [styles.card, pressed && { opacity: 0.95 }]}
                   >
                     {!!img && (
@@ -368,7 +430,7 @@ const styles = StyleSheet.create({
   sectionTitle: { fontFamily: Fonts.rounded, fontSize: 16, opacity: 0.9 },
 
   miniLoading: { paddingVertical: 8, flexDirection: "row", gap: 10, alignItems: "center" },
-  errorLine: { opacity: 0.9, color: "#b00020" },
+  errorLine: { opacity: 0.95, color: "#b00020" },
 
   card: {
     borderRadius: 18,
