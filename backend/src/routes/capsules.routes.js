@@ -1,5 +1,8 @@
+// backend/src/routes/capsules.routes.js
+require("dotenv").config();
 const router = require("express").Router();
 const auth = require("../middlewares/auth");
+const { Op } = require("sequelize");
 
 const Capsule = require("../models/Capsule");
 const User = require("../models/User");
@@ -16,7 +19,7 @@ const {
 } = require("../services/capsule.service");
 
 /**
- * Helper: APP_URL pentru payload-ul QR (NU îl salvăm în DB)
+ * APP_URL pentru payload QR (NU îl salvăm în DB)
  * Pune în backend/.env:
  * APP_URL=https://xxxx.ngrok-free.app
  */
@@ -29,8 +32,7 @@ function getAppUrl(req) {
 }
 
 function qrPayloadForCapsule(req, capsuleId) {
-  // IMPORTANT: acesta trebuie să corespundă cu ruta expo-router:
-  // app/capsule/key/[id].tsx  =>  /capsule/key/:id
+  // expo-router: app/capsule/key/[id].tsx => /capsule/key/:id
   return `${getAppUrl(req)}/capsule/key/${capsuleId}`;
 }
 
@@ -39,7 +41,7 @@ function qrPayloadForCapsule(req, capsuleId) {
  * ca să nu crape pe DB cu "invalid column".
  */
 function pickModelFields(model, data) {
-  const allowed = new Set(Object.keys(model.rawAttributes || {}));
+  const allowed = new Set(Object.keys(model?.rawAttributes || {}));
   const out = {};
   for (const [k, v] of Object.entries(data || {})) {
     if (allowed.has(k)) out[k] = v;
@@ -47,8 +49,125 @@ function pickModelFields(model, data) {
   return out;
 }
 
+/**
+ * Alege automat un câmp de sortare existent: created_at / createdAt / PK
+ */
+function getOrderField(model) {
+  const attrs = model?.rawAttributes || {};
+  if (attrs.created_at) return "created_at";
+  if (attrs.createdAt) return "createdAt";
+  return model?.primaryKeyAttribute || "id";
+}
+
+function orderByCreated(model, dir = "DESC") {
+  return [[getOrderField(model), dir]];
+}
+
+/**
+ * Safe user attrs (fără parolă) - compatibil cu id / user_id
+ */
+function getSafeUserAttrs() {
+  const u = User?.rawAttributes || {};
+  const safe = [];
+  if (u.id) safe.push("id");
+  if (u.user_id) safe.push("user_id");
+  if (u.username) safe.push("username");
+  if (u.email) safe.push("email");
+  if (u.name) safe.push("name");
+  if (u.avatar_url) safe.push("avatar_url");
+  return safe.length ? safe : undefined;
+}
+
+function getAuthUserId(req) {
+  return req.user?.id ?? req.user?.user_id ?? null;
+}
+
+function toId(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * Enrich pentru key meta (qr/exp/has_key)
+ */
+async function enrichWithKeyMeta(req, capsules) {
+  const arr = Array.isArray(capsules) ? capsules : [];
+  const ids = arr.map((c) => c?.capsule_id).filter(Boolean);
+
+  const keys = ids.length
+    ? await CapsuleKey.findAll({
+        where: { capsule_id: ids },
+        attributes: ["capsule_id", "expires_at"],
+        raw: true,
+      })
+    : [];
+
+  const keyMap = new Map(keys.map((k) => [k.capsule_id, k]));
+
+  return arr.map((c) => {
+    const row = typeof c?.toJSON === "function" ? c.toJSON() : c;
+    const keyRow = keyMap.get(row.capsule_id);
+
+    return {
+      ...row,
+      qr_payload: row.capsule_type === "key" ? qrPayloadForCapsule(req, row.capsule_id) : null,
+      key_expires_at: keyRow?.expires_at || null,
+      has_key: !!keyRow,
+    };
+  });
+}
+
+// ─────────────────────────────────────────────
+// IMPORTANT: rutele "statice" (ex: /search, /my) trebuie
+// să fie ÎNAINTE de "/:id" ca să nu intre în conflict.
+// ─────────────────────────────────────────────
+
+// ─────────────────────────────────────────────
+// SEARCH capsules
+// GET /capsules/search?q=...
+// ─────────────────────────────────────────────
+router.get("/search", auth, async (req, res, next) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    if (!q) return res.json([]);
+
+    const userId = getAuthUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    // coloane existente
+    const attrs = Capsule?.rawAttributes || {};
+    const whereOr = [];
+    if (attrs.title) whereOr.push({ title: { [Op.like]: `%${q}%` } });
+    if (attrs.description) whereOr.push({ description: { [Op.like]: `%${q}%` } });
+
+    if (!whereOr.length) return res.json([]);
+
+    const list = await Capsule.findAll({
+      where: { [Op.or]: whereOr },
+      order: orderByCreated(Capsule, "DESC"),
+      limit: 50,
+    });
+
+    // refresh status
+    for (const c of list) await refreshCapsuleStatus(c);
+
+    // filtrează capsulele pe care userul are voie să le vadă
+    const allowed = [];
+    for (const c of list) {
+      const ok = await canUserViewCapsule(c, userId);
+      if (ok) allowed.push(c);
+    }
+
+    const enriched = await enrichWithKeyMeta(req, allowed);
+    return res.json(enriched);
+  } catch (e) {
+    next(e);
+  }
+});
+
 // ─────────────────────────────────────────────
 // CREATE capsule (TIME/CO/KEY)
+// POST /capsules
 // ─────────────────────────────────────────────
 router.post("/", auth, async (req, res, next) => {
   try {
@@ -61,8 +180,8 @@ router.post("/", auth, async (req, res, next) => {
       required_contributors = null,
 
       // KEY only:
-      key_plain = null,     // parola aleasă de creator
-      media_url = null,     // POZA (URL de la /upload)
+      key_plain = null,
+      media_url = null,
       key_expires_at = null,
     } = req.body || {};
 
@@ -78,7 +197,6 @@ router.post("/", auth, async (req, res, next) => {
       return res.status(400).json({ error: "required_contributors must be >= 2 for co capsules" });
     }
 
-    // ✅ KEY capsule: trebuie cheie + poză
     if (capsule_type === "key") {
       if (!key_plain || !String(key_plain).trim()) {
         return res.status(400).json({ error: "key_plain is required for key capsules" });
@@ -88,11 +206,11 @@ router.post("/", auth, async (req, res, next) => {
       }
     }
 
-    // ⚠ IMPORTANT:
-    // Capsule model-ul tău NU are media_url/cover_url,
-    // deci NU încercăm să le salvăm aici.
+    const userId = getAuthUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
     const capsulePayload = pickModelFields(Capsule, {
-      creator_id: req.user.id,
+      creator_id: userId,
       title,
       description,
       capsule_type,
@@ -104,23 +222,17 @@ router.post("/", auth, async (req, res, next) => {
 
     const created = await Capsule.create(capsulePayload);
 
-    // ✅ Pentru KEY capsule:
-    // 1) salvăm cheia (hash) în capsule_key (tabel existent)
-    // 2) salvăm POZA în CapsuleContribution (tabel existent) ca “secret media”
     if (capsule_type === "key") {
       const expiresAt = key_expires_at ? new Date(key_expires_at) : null;
 
-      // Service-ul tău trebuie să salveze HASH în CapsuleKey.value.
       await createKeyForCapsule(created.capsule_id, {
         expiresAt,
         plainKey: String(key_plain),
       });
 
-      // ✅ Salvează poza într-o contribuție (sigur există coloana media_url acolo)
-      // o marcăm ca “secret” prin faptul că e prima contribuție și e făcută de owner
       await CapsuleContribution.create({
         capsule_id: created.capsule_id,
-        user_id: req.user.id,
+        user_id: userId,
         content_text: null,
         media_url: String(media_url),
       });
@@ -129,10 +241,11 @@ router.post("/", auth, async (req, res, next) => {
         ...created.toJSON(),
         qr_payload: qrPayloadForCapsule(req, created.capsule_id),
         key_expires_at: expiresAt || null,
+        has_key: true,
       });
     }
 
-    res.status(201).json(created);
+    return res.status(201).json(created);
   } catch (e) {
     next(e);
   }
@@ -140,37 +253,22 @@ router.post("/", auth, async (req, res, next) => {
 
 // ─────────────────────────────────────────────
 // LIST my capsules
+// GET /capsules/my
 // ─────────────────────────────────────────────
 router.get("/my", auth, async (req, res, next) => {
   try {
+    const userId = getAuthUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
     const list = await Capsule.findAll({
-      where: { creator_id: req.user.id },
-      order: [["created_at", "DESC"]],
+      where: { creator_id: userId },
+      order: orderByCreated(Capsule, "DESC"),
     });
 
     for (const c of list) await refreshCapsuleStatus(c);
 
-    const ids = list.map((x) => x.capsule_id);
-    const keys = await CapsuleKey.findAll({
-      where: { capsule_id: ids },
-      attributes: ["capsule_id", "expires_at"],
-      raw: true,
-    });
-    const keyMap = new Map(keys.map((k) => [k.capsule_id, k]));
-
-    const enriched = list.map((c) => {
-      const row = c.toJSON();
-      const keyRow = keyMap.get(c.capsule_id);
-
-      return {
-        ...row,
-        qr_payload: row.capsule_type === "key" ? qrPayloadForCapsule(req, row.capsule_id) : null,
-        key_expires_at: keyRow?.expires_at || null,
-        has_key: !!keyRow,
-      };
-    });
-
-    res.json(enriched);
+    const enriched = await enrichWithKeyMeta(req, list);
+    return res.json(enriched);
   } catch (e) {
     next(e);
   }
@@ -178,37 +276,19 @@ router.get("/my", auth, async (req, res, next) => {
 
 // ─────────────────────────────────────────────
 // LIST all capsules (feed helper)
+// GET /capsules
 // ─────────────────────────────────────────────
 router.get("/", auth, async (req, res, next) => {
   try {
     const list = await Capsule.findAll({
-      order: [["created_at", "DESC"]],
+      order: orderByCreated(Capsule, "DESC"),
       limit: 100,
     });
 
     for (const c of list) await refreshCapsuleStatus(c);
 
-    const ids = list.map((x) => x.capsule_id);
-    const keys = await CapsuleKey.findAll({
-      where: { capsule_id: ids },
-      attributes: ["capsule_id", "expires_at"],
-      raw: true,
-    });
-    const keyMap = new Map(keys.map((k) => [k.capsule_id, k]));
-
-    const enriched = list.map((c) => {
-      const row = c.toJSON();
-      const keyRow = keyMap.get(c.capsule_id);
-
-      return {
-        ...row,
-        qr_payload: row.capsule_type === "key" ? qrPayloadForCapsule(req, row.capsule_id) : null,
-        key_expires_at: keyRow?.expires_at || null,
-        has_key: !!keyRow,
-      };
-    });
-
-    res.json(enriched);
+    const enriched = await enrichWithKeyMeta(req, list);
+    return res.json(enriched);
   } catch (e) {
     next(e);
   }
@@ -216,25 +296,32 @@ router.get("/", auth, async (req, res, next) => {
 
 // ─────────────────────────────────────────────
 // GET capsule details (+ contributions if allowed)
+// GET /capsules/:id
 // ─────────────────────────────────────────────
 router.get("/:id", auth, async (req, res, next) => {
   try {
-    const capsule = await Capsule.findByPk(req.params.id);
+    const id = toId(req.params.id);
+    if (!id) return res.status(400).json({ error: "Invalid capsule id" });
+
+    const capsule = await Capsule.findByPk(id);
     if (!capsule) return res.status(404).json({ error: "Capsule not found" });
 
     await refreshCapsuleStatus(capsule);
 
-    const allowed = await canUserViewCapsule(capsule, req.user.id);
+    const userId = getAuthUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const allowed = await canUserViewCapsule(capsule, userId);
     if (!allowed) return res.status(403).json({ error: "No access to this capsule" });
 
-    const canSeeContent = capsule.status === "open" || capsule.creator_id === req.user.id;
+    const canSeeContent = capsule.status === "open" || capsule.creator_id === userId;
 
     let contributions = [];
     if (canSeeContent) {
       contributions = await CapsuleContribution.findAll({
         where: { capsule_id: capsule.capsule_id },
-        include: [{ model: User, attributes: ["id", "username", "email"] }],
-        order: [["created_at", "ASC"]],
+        include: [{ model: User, attributes: getSafeUserAttrs(), required: false }],
+        order: orderByCreated(CapsuleContribution, "ASC"),
       });
     }
 
@@ -250,6 +337,7 @@ router.get("/:id", auth, async (req, res, next) => {
         attributes: ["capsule_id", "expires_at"],
         raw: true,
       });
+
       keyMeta = {
         has_key: !!k,
         key_expires_at: k?.expires_at || null,
@@ -257,7 +345,7 @@ router.get("/:id", auth, async (req, res, next) => {
       };
     }
 
-    res.json({
+    return res.json({
       capsule,
       contributions,
       uniqueContributors,
@@ -269,12 +357,15 @@ router.get("/:id", auth, async (req, res, next) => {
 });
 
 // ─────────────────────────────────────────────
-// UNLOCK key capsule (introduci cheia → primești poza)
+// UNLOCK key capsule
 // POST /capsules/:id/unlock { key: "..." }
 // ─────────────────────────────────────────────
 router.post("/:id/unlock", auth, async (req, res, next) => {
   try {
-    const capsule = await Capsule.findByPk(req.params.id);
+    const id = toId(req.params.id);
+    if (!id) return res.status(400).json({ error: "Invalid capsule id" });
+
+    const capsule = await Capsule.findByPk(id);
     if (!capsule) return res.status(404).json({ error: "Capsule not found" });
 
     if (capsule.capsule_type !== "key") {
@@ -284,20 +375,21 @@ router.post("/:id/unlock", auth, async (req, res, next) => {
     const { key } = req.body || {};
     if (!key) return res.status(400).json({ error: "key is required" });
 
-    // bcrypt compare + create CapsuleAccess
-    const result = await joinWithKey(capsule.capsule_id, req.user.id, String(key));
+    const userId = getAuthUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const result = await joinWithKey(capsule.capsule_id, userId, String(key));
     if (!result.ok) return res.status(401).json({ error: "Invalid or expired key" });
 
-    // ✅ Poza secretă e în CapsuleContribution (prima contribuție cu media)
     const secret = await CapsuleContribution.findOne({
-      where: { capsule_id: capsule.capsule_id },
-      // ia prima contribuție care are media_url
-      order: [["created_at", "ASC"]],
+      where: {
+        capsule_id: capsule.capsule_id,
+        media_url: { [Op.ne]: null },
+      },
+      order: orderByCreated(CapsuleContribution, "ASC"),
     });
 
-    const media = secret?.media_url || null;
-
-    return res.json({ ok: true, media_url: media });
+    return res.json({ ok: true, media_url: secret?.media_url || null });
   } catch (e) {
     next(e);
   }
@@ -305,10 +397,14 @@ router.post("/:id/unlock", auth, async (req, res, next) => {
 
 // ─────────────────────────────────────────────
 // ADD contribution
+// POST /capsules/:id/contributions
 // ─────────────────────────────────────────────
 router.post("/:id/contributions", auth, async (req, res, next) => {
   try {
-    const capsule = await Capsule.findByPk(req.params.id);
+    const id = toId(req.params.id);
+    if (!id) return res.status(400).json({ error: "Invalid capsule id" });
+
+    const capsule = await Capsule.findByPk(id);
     if (!capsule) return res.status(404).json({ error: "Capsule not found" });
 
     await refreshCapsuleStatus(capsule);
@@ -317,7 +413,10 @@ router.post("/:id/contributions", auth, async (req, res, next) => {
       return res.status(409).json({ error: "Capsule is archived" });
     }
 
-    const allowed = await canUserViewCapsule(capsule, req.user.id);
+    const userId = getAuthUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const allowed = await canUserViewCapsule(capsule, userId);
     if (!allowed) return res.status(403).json({ error: "No access to this capsule" });
 
     const { content_text = null, media_url = null } = req.body || {};
@@ -327,12 +426,12 @@ router.post("/:id/contributions", auth, async (req, res, next) => {
 
     const created = await CapsuleContribution.create({
       capsule_id: capsule.capsule_id,
-      user_id: req.user.id,
+      user_id: userId,
       content_text,
       media_url,
     });
 
-    res.status(201).json(created);
+    return res.status(201).json(created);
   } catch (e) {
     next(e);
   }
@@ -340,15 +439,22 @@ router.post("/:id/contributions", auth, async (req, res, next) => {
 
 // ─────────────────────────────────────────────
 // TRY OPEN capsule
+// POST /capsules/:id/open
 // ─────────────────────────────────────────────
 router.post("/:id/open", auth, async (req, res, next) => {
   try {
-    const capsule = await Capsule.findByPk(req.params.id);
+    const id = toId(req.params.id);
+    if (!id) return res.status(400).json({ error: "Invalid capsule id" });
+
+    const capsule = await Capsule.findByPk(id);
     if (!capsule) return res.status(404).json({ error: "Capsule not found" });
 
     await refreshCapsuleStatus(capsule);
 
-    const allowed = await canUserViewCapsule(capsule, req.user.id);
+    const userId = getAuthUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const allowed = await canUserViewCapsule(capsule, userId);
     if (!allowed) return res.status(403).json({ error: "No access to this capsule" });
 
     const result = await attemptOpenCapsule(capsule);
@@ -361,21 +467,28 @@ router.post("/:id/open", auth, async (req, res, next) => {
       });
     }
 
-    res.json(result.capsule);
+    return res.json(result.capsule);
   } catch (e) {
     next(e);
   }
 });
 
 // ─────────────────────────────────────────────
-// GENERATE KEY / JOIN WITH KEY (păstrăm)
+// GENERATE KEY (owner)
+// POST /capsules/:id/generate-key
 // ─────────────────────────────────────────────
 router.post("/:id/generate-key", auth, async (req, res, next) => {
   try {
-    const capsule = await Capsule.findByPk(req.params.id);
+    const id = toId(req.params.id);
+    if (!id) return res.status(400).json({ error: "Invalid capsule id" });
+
+    const capsule = await Capsule.findByPk(id);
     if (!capsule) return res.status(404).json({ error: "Capsule not found" });
 
-    if (capsule.creator_id !== req.user.id) {
+    const userId = getAuthUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    if (capsule.creator_id !== userId) {
       return res.status(403).json({ error: "Only owner can generate keys" });
     }
 
@@ -386,11 +499,11 @@ router.post("/:id/generate-key", auth, async (req, res, next) => {
     const { expires_at = null, key_plain = null } = req.body || {};
 
     const keyObj = await createKeyForCapsule(capsule.capsule_id, {
-      expiresAt: expires_at,
+      expiresAt: expires_at ? new Date(expires_at) : null,
       plainKey: key_plain ? String(key_plain) : null,
     });
 
-    res.status(201).json({
+    return res.status(201).json({
       key: keyObj.value,
       expires_at: keyObj.expires_at || null,
       qr_payload: qrPayloadForCapsule(req, capsule.capsule_id),
@@ -400,10 +513,20 @@ router.post("/:id/generate-key", auth, async (req, res, next) => {
   }
 });
 
+// ─────────────────────────────────────────────
+// JOIN WITH KEY
+// POST /capsules/:id/join-with-key
+// ─────────────────────────────────────────────
 router.post("/:id/join-with-key", auth, async (req, res, next) => {
   try {
-    const capsule = await Capsule.findByPk(req.params.id);
+    const id = toId(req.params.id);
+    if (!id) return res.status(400).json({ error: "Invalid capsule id" });
+
+    const capsule = await Capsule.findByPk(id);
     if (!capsule) return res.status(404).json({ error: "Capsule not found" });
+
+    const userId = getAuthUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
     if (capsule.capsule_type !== "key") {
       return res.status(409).json({ error: "join-with-key is only for key capsules" });
@@ -412,10 +535,10 @@ router.post("/:id/join-with-key", auth, async (req, res, next) => {
     const { key } = req.body || {};
     if (!key) return res.status(400).json({ error: "key is required" });
 
-    const result = await joinWithKey(capsule.capsule_id, req.user.id, String(key));
+    const result = await joinWithKey(capsule.capsule_id, userId, String(key));
     if (!result.ok) return res.status(403).json({ error: "Invalid or expired key" });
 
-    res.json({ message: "Access granted" });
+    return res.json({ message: "Access granted" });
   } catch (e) {
     next(e);
   }
