@@ -34,18 +34,15 @@ export default function PostDetailsScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
-  // MVP: fără "likedByMe" din backend -> îl ținem local
   const [liked, setLiked] = useState(false);
   const [liking, setLiking] = useState(false);
 
-  const authorName = useMemo(() => {
-    return post?.User?.name || post?.User?.username || "User";
-  }, [post]);
+  const authorName = useMemo(() => post?.User?.name || post?.User?.username || "User", [post]);
 
   const authorId = useMemo(() => {
-    // suportă id sau user_id
     const u = post?.User as any;
-    return u?.id ?? u?.user_id ?? null;
+    const n = Number(u?.id ?? u?.user_id);
+    return Number.isFinite(n) && n > 0 ? n : null;
   }, [post]);
 
   const created = useMemo(() => {
@@ -54,17 +51,13 @@ export default function PostDetailsScreen() {
   }, [post]);
 
   const load = useCallback(async () => {
-    if (!postId) return;
+    if (!Number.isFinite(postId) || postId <= 0) return;
 
     try {
       setLoading(true);
       const data = await getPostById(postId);
-      if (!data) {
-        setPost(null);
-      } else {
-        setPost(data);
-      }
-    } catch (e: any) {
+      setPost(data ?? null);
+    } catch {
       Alert.alert("Eroare", "Nu am putut încărca postarea.");
       setPost(null);
     } finally {
@@ -86,32 +79,29 @@ export default function PostDetailsScreen() {
   }, [load]);
 
   const toggleLike = useCallback(async () => {
-    if (!postId) return;
-    if (liking) return;
+    if (!postId || liking) return;
+
+    const wasLiked = liked;
 
     try {
       setLiking(true);
 
-      // optimistic UI
-      setLiked((prev) => !prev);
+      // optimistic
+      setLiked(!wasLiked);
       setPost((prev) => {
         if (!prev) return prev;
-        const nextLiked = !liked;
-        const delta = nextLiked ? 1 : -1;
+        const delta = wasLiked ? -1 : 1;
         return { ...prev, likeCount: Math.max(0, (prev.likeCount ?? 0) + delta) };
       });
 
-      if (!liked) {
-        await likePost(postId);
-      } else {
-        await unlikePost(postId);
-      }
-    } catch (e) {
+      if (!wasLiked) await likePost(postId);
+      else await unlikePost(postId);
+    } catch {
       // rollback
-      setLiked((prev) => !prev);
+      setLiked(wasLiked);
       setPost((prev) => {
         if (!prev) return prev;
-        const delta = liked ? 1 : -1; // invers pentru rollback
+        const delta = wasLiked ? 1 : -1;
         return { ...prev, likeCount: Math.max(0, (prev.likeCount ?? 0) + delta) };
       });
       Alert.alert("Eroare", "Nu am putut modifica like-ul.");
@@ -120,7 +110,7 @@ export default function PostDetailsScreen() {
     }
   }, [postId, liking, liked]);
 
-  if (!postId) {
+  if (!Number.isFinite(postId) || postId <= 0) {
     return (
       <ThemedView style={styles.center}>
         <ThemedText>Invalid post id.</ThemedText>
@@ -130,7 +120,6 @@ export default function PostDetailsScreen() {
 
   return (
     <ImageBackground source={BG} style={{ flex: 1 }}>
-      {/* Header */}
       <View style={styles.header}>
         <Pressable onPress={() => router.back()} style={styles.backBtn}>
           <Ionicons name="chevron-back" size={22} color="#111" />
@@ -154,11 +143,10 @@ export default function PostDetailsScreen() {
           </ThemedView>
         ) : (
           <>
-            {/* Author row */}
             <Pressable
               onPress={() => {
                 if (!authorId) return;
-                router.push(`/user/${authorId}` as any);
+                router.push(`/profile/${authorId}` as any);
               }}
               style={({ pressed }) => [styles.authorRow, pressed && { opacity: 0.9 }]}
             >
@@ -176,21 +164,18 @@ export default function PostDetailsScreen() {
               <Ionicons name="chevron-forward" size={18} color="#111" style={{ opacity: 0.6 }} />
             </Pressable>
 
-            {/* Image */}
             {!!post.media_url && (
               <View style={styles.imgWrap}>
                 <Image source={{ uri: post.media_url }} style={styles.img} />
               </View>
             )}
 
-            {/* Text */}
             {!!post.content_text && (
               <ThemedView style={styles.textCard}>
                 <ThemedText style={styles.postText}>{post.content_text}</ThemedText>
               </ThemedView>
             )}
 
-            {/* Actions */}
             <ThemedView style={styles.actionsRow}>
               <Pressable
                 onPress={toggleLike}
@@ -201,24 +186,20 @@ export default function PostDetailsScreen() {
                   liking && { opacity: 0.6 },
                 ]}
               >
-                <Ionicons
-                  name={liked ? "heart" : "heart-outline"}
-                  size={18}
-                  color="#111"
-                />
-                <ThemedText style={styles.actionText}>
-                  {post.likeCount ?? 0}
-                </ThemedText>
+                <Ionicons name={liked ? "heart" : "heart-outline"} size={18} color="#111" />
+                <ThemedText style={styles.actionText}>{post.likeCount ?? 0}</ThemedText>
               </Pressable>
 
               <Pressable
-                onPress={() => router.push(`/post/${postId}/comments` as any)}
+                onPress={() =>
+                  router.push(
+                    { pathname: "/post/[id]/comments", params: { id: String(postId) } } as any
+                  )
+                }
                 style={({ pressed }) => [styles.actionBtn, pressed && { opacity: 0.8 }]}
               >
                 <Ionicons name="chatbubble-outline" size={18} color="#111" />
-                <ThemedText style={styles.actionText}>
-                  {post.commentCount ?? 0}
-                </ThemedText>
+                <ThemedText style={styles.actionText}>{post.commentCount ?? 0}</ThemedText>
               </Pressable>
             </ThemedView>
           </>

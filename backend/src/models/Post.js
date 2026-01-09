@@ -1,3 +1,4 @@
+// backend/src/models/Post.js
 const { DataTypes } = require("sequelize");
 const { sequelize } = require("../config/db");
 const User = require("./User");
@@ -7,7 +8,14 @@ const Post = sequelize.define(
   {
     id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
 
-    user_id: { type: DataTypes.INTEGER, allowNull: false },
+    user_id: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      references: {
+        model: User,
+        key: User.primaryKeyAttribute || "id",
+      },
+    },
 
     content_text: { type: DataTypes.TEXT, allowNull: true },
     media_url: { type: DataTypes.STRING, allowNull: true },
@@ -21,12 +29,30 @@ const Post = sequelize.define(
   {
     tableName: "posts",
     timestamps: true,
-    underscored: true, // asta îți creează created_at / updated_at
+    underscored: true, // created_at / updated_at
+    freezeTableName: true,
   }
 );
 
-// asocieri
-User.hasMany(Post, { foreignKey: "user_id", onDelete: "CASCADE" });
-Post.belongsTo(User, { foreignKey: "user_id" });
+/**
+ * Relations (define once)
+ */
+if (!Post.associations?.User) {
+  User.hasMany(Post, {
+    foreignKey: "user_id",
+    as: "posts",
+    constraints: true,
+    onDelete: "CASCADE",
+    onUpdate: "CASCADE",
+  });
+
+  Post.belongsTo(User, {
+    foreignKey: "user_id",
+    as: "User", // IMPORTANT: în feed tu primești p.User
+    constraints: true,
+    onDelete: "CASCADE",
+    onUpdate: "CASCADE",
+  });
+}
 
 module.exports = Post;
