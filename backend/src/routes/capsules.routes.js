@@ -118,6 +118,43 @@ function getSafeUserAttrs() {
   return safe.length ? safe : undefined;
 }
 
+/* ───────────────────── Time capsule auto-delete ───────────────────── */
+/**
+ * ✅ Dacă open_at a trecut pentru capsule_type="time", capsula este ștearsă din DB
+ * (și dispare automat din feed pentru toată lumea).
+ */
+function isTimeCapsuleExpired(capsule) {
+  try {
+    const row = typeof capsule?.toJSON === "function" ? capsule.toJSON() : capsule;
+    if (row?.capsule_type !== "time") return false;
+    if (!row?.open_at) return false;
+
+    const t = Date.parse(row.open_at);
+    if (Number.isNaN(t)) return false;
+
+    return Date.now() >= t;
+  } catch {
+    return false;
+  }
+}
+
+async function deleteCapsuleCascade(cid, transaction = null) {
+  const opts = transaction ? { transaction } : undefined;
+
+  try {
+    await CapsuleContribution.destroy({ where: { capsule_id: cid }, ...(opts || {}) });
+  } catch {}
+
+  try {
+    await CapsuleKey.destroy({ where: { capsule_id: cid }, ...(opts || {}) });
+  } catch {}
+
+  try {
+    const pk = getCapsulePkField();
+    await Capsule.destroy({ where: { [pk]: cid }, ...(opts || {}) });
+  } catch {}
+}
+
 /* ───────────────────── Privacy (Varianta A) ───────────────────── */
 
 /**
@@ -346,15 +383,27 @@ function enrichWithCanDelete(capsules, userId) {
 }
 
 /**
- * Helper: refresh + access filter (service) + privacy filter + enrich
+ * Helper: refresh + purge time-expired + access filter (service) + privacy filter + enrich
  */
 async function prepareListForUser(req, list, userId) {
-  // refresh status
-  for (const c of list) await refreshCapsuleStatus(c);
+  // refresh status + purge time capsules expired
+  const afterPurge = [];
+  for (const c of Array.isArray(list) ? list : []) {
+    await refreshCapsuleStatus(c);
+
+    if (isTimeCapsuleExpired(c)) {
+      const row = typeof c?.toJSON === "function" ? c.toJSON() : c;
+      const cid = Number(row?.capsule_id ?? row?.id);
+      if (cid) await deleteCapsuleCascade(cid);
+      continue;
+    }
+
+    afterPurge.push(c);
+  }
 
   // service-level access
   const allowedByRules = [];
-  for (const c of list) {
+  for (const c of afterPurge) {
     const ok = await canUserViewCapsule(c, userId);
     if (ok) allowedByRules.push(c);
   }
@@ -440,7 +489,9 @@ router.post("/", auth, async (req, res, next) => {
         return res.status(400).json({ error: "key_plain is required for key capsules" });
       }
       if (!media_url || !String(media_url).trim()) {
-        return res.status(400).json({ error: "media_url (image url) is required for key capsules" });
+        return res
+          .status(400)
+          .json({ error: "media_url (image url) is required for key capsules" });
       }
     }
 
@@ -525,7 +576,6 @@ router.get("/my", auth, async (req, res, next) => {
       order: orderByCreated(Capsule, "DESC"),
     });
 
-    // my -> nu are sens privacy filter (oricum sunt ale mele), dar păstrăm flow consistent
     const enriched = await prepareListForUser(req, list, userId);
     return res.json(enriched);
   } catch (e) {
@@ -592,11 +642,8 @@ router.delete("/:id", auth, async (req, res, next) => {
       capsule?.get?.(getCapsulePkField()) ?? capsule?.[getCapsulePkField()] ?? id
     );
 
-    await CapsuleContribution.destroy({ where: { capsule_id: cid }, transaction: t });
-    await CapsuleKey.destroy({ where: { capsule_id: cid }, transaction: t });
-
-    const pk = getCapsulePkField();
-    await Capsule.destroy({ where: { [pk]: cid }, transaction: t });
+    // cascade delete
+    await deleteCapsuleCascade(cid, t);
 
     await t.commit();
     return res.json({ ok: true });
@@ -617,6 +664,14 @@ router.get("/:id", auth, async (req, res, next) => {
     if (!capsule) return res.status(404).json({ error: "Capsule not found" });
 
     await refreshCapsuleStatus(capsule);
+
+    // ✅ dacă e time capsule și a expirat -> ștergem și returnăm 404 (nu mai există)
+    if (isTimeCapsuleExpired(capsule)) {
+      const row = typeof capsule?.toJSON === "function" ? capsule.toJSON() : capsule;
+      const cid = Number(row?.capsule_id ?? row?.id);
+      if (cid) await deleteCapsuleCascade(cid);
+      return res.status(404).json({ error: "Capsule expired" });
+    }
 
     const userId = getAuthUserId(req);
     if (!userId) return res.status(401).json({ error: "Unauthorized" });
@@ -742,6 +797,14 @@ router.post("/:id/contributions", auth, async (req, res, next) => {
 
     await refreshCapsuleStatus(capsule);
 
+    // ✅ time expired -> delete + conflict
+    if (isTimeCapsuleExpired(capsule)) {
+      const row = typeof capsule?.toJSON === "function" ? capsule.toJSON() : capsule;
+      const cid = Number(row?.capsule_id ?? row?.id);
+      if (cid) await deleteCapsuleCascade(cid);
+      return res.status(409).json({ error: "Capsule expired" });
+    }
+
     if (capsule.status === "archived") {
       return res.status(409).json({ error: "Capsule is archived" });
     }
@@ -801,6 +864,14 @@ router.post("/:id/open", auth, async (req, res, next) => {
     if (!capsule) return res.status(404).json({ error: "Capsule not found" });
 
     await refreshCapsuleStatus(capsule);
+
+    // ✅ time expired -> delete + 409
+    if (isTimeCapsuleExpired(capsule)) {
+      const row = typeof capsule?.toJSON === "function" ? capsule.toJSON() : capsule;
+      const cid = Number(row?.capsule_id ?? row?.id);
+      if (cid) await deleteCapsuleCascade(cid);
+      return res.status(409).json({ error: "Capsule expired" });
+    }
 
     const userId = getAuthUserId(req);
     if (!userId) return res.status(401).json({ error: "Unauthorized" });
