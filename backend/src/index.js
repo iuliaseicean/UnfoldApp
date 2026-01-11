@@ -12,8 +12,13 @@ const { connectDB, sequelize } = require("./config/db");
 
 // ─────────────────────────────────────────────
 // Import modele (ca să înregistreze asocierile)
+// IMPORTANT: încarcă User + UserSettings înainte de associations
 // ─────────────────────────────────────────────
 require("./models/User");
+require("./models/UserSettings");
+require("./models/associations");
+
+// content model (dacă îl folosești separat)
 require("./models/Content");
 
 // capsule models
@@ -100,6 +105,7 @@ app.use(require("./middlewares/error"));
       console.log("📊 Tables synchronized (DB_SYNC=true)");
     } else {
       console.log("ℹ Skipping sequelize.sync() (DB_SYNC is not true)");
+      console.log("ℹ Privacy mode (varianta A) folosește tabela user_settings; toggle-ul va funcționa doar dacă tabela există în DB.");
     }
 
     const PORT = Number(process.env.PORT || 4000);

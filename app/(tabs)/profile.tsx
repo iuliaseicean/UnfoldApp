@@ -22,12 +22,19 @@ type MeResponse = {
   username: string;
   email: string;
   bio?: string | null;
+
+  // ✅ Varianta A: backend /users/me întoarce is_private
+  is_private?: boolean;
 };
 
 export default function ProfileScreen() {
   const [user, setUser] = useState<MeResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [publicAccount, setPublicAccount] = useState(true); // momentan doar local
+
+  // ✅ publicAccount = !is_private
+  const [publicAccount, setPublicAccount] = useState(true);
+
+  const [savingPrivacy, setSavingPrivacy] = useState(false);
   const [error, setError] = useState("");
   const [avatarUri, setAvatarUri] = useState<string | null>(null);
 
@@ -37,10 +44,15 @@ export default function ProfileScreen() {
         setError("");
         setLoading(true);
 
-        const res = await api.get<MeResponse>("/auth/me");
+        // ✅ IMPORTANT: folosește /users/me (nu /auth/me)
+        const res = await api.get<MeResponse>("/users/me");
+
         setUser(res.data);
+
+        const isPrivate = !!res.data?.is_private;
+        setPublicAccount(!isPrivate);
       } catch (e: any) {
-        console.log("Error loading /auth/me:", e?.message || e);
+        console.log("Error loading /users/me:", e?.message || e);
         setError("Couldn't load profile. Please try again.");
       } finally {
         setLoading(false);
@@ -59,11 +71,52 @@ export default function ProfileScreen() {
     }
   };
 
+  // ✅ Salvează privacy în backend
+  const handleTogglePublicAccount = async (nextPublic: boolean) => {
+    if (!user?.id) {
+      setPublicAccount(nextPublic);
+      return;
+    }
+
+    const prev = publicAccount;
+    setPublicAccount(nextPublic);
+    setSavingPrivacy(true);
+    setError("");
+
+    try {
+      // publicAccount=true  => is_private=false
+      // publicAccount=false => is_private=true
+      const nextIsPrivate = !nextPublic;
+
+      const res = await api.patch<MeResponse>("/users/me", {
+        is_private: nextIsPrivate,
+      });
+
+      // actualizează user-ul + sincronizează switch cu ce vine din backend
+      const updated = res.data;
+      setUser(updated);
+
+      const isPrivate = !!updated?.is_private;
+      setPublicAccount(!isPrivate);
+    } catch (e: any) {
+      console.log("Privacy toggle error:", e?.response?.data || e?.message || e);
+
+      // rollback UI
+      setPublicAccount(prev);
+
+      Alert.alert(
+        "Couldn't update privacy",
+        "Please try again. If it still fails, the server might not be able to write user_settings."
+      );
+    } finally {
+      setSavingPrivacy(false);
+    }
+  };
+
   // Alege poza de profil din galerie
   const handlePickAvatar = async () => {
     try {
-      const { status } =
-        await ImagePicker.requestMediaLibraryPermissionsAsync();
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
 
       if (status !== "granted") {
         Alert.alert(
@@ -106,19 +159,14 @@ export default function ProfileScreen() {
             <View style={styles.content}>
               {/* CARD AVATAR */}
               <View style={styles.avatarCard}>
-                <Pressable
-                  style={styles.avatarPressable}
-                  onPress={handlePickAvatar}
-                >
+                <Pressable style={styles.avatarPressable} onPress={handlePickAvatar}>
                   {avatarUri ? (
                     <Image source={{ uri: avatarUri }} style={styles.avatarImage} />
                   ) : (
                     <View style={styles.avatarCircle} />
                   )}
                 </Pressable>
-                <Text style={styles.tapToChangeText}>
-                  Tap to change photo
-                </Text>
+                <Text style={styles.tapToChangeText}>Tap to change photo</Text>
               </View>
 
               {/* EMAIL */}
@@ -127,16 +175,26 @@ export default function ProfileScreen() {
               {/* TOGGLE PUBLIC ACCOUNT */}
               <View style={styles.toggleContainer}>
                 <View style={styles.toggleTrack}>
-                  <Text style={styles.toggleLabel}>Public Account</Text>
+                  <Text style={styles.toggleLabel}>
+                    {publicAccount ? "Public Account" : "Private Account"}
+                  </Text>
+
                   <View style={styles.toggleSwitchWrapper}>
                     <Switch
                       value={publicAccount}
-                      onValueChange={setPublicAccount}
+                      onValueChange={handleTogglePublicAccount}
+                      disabled={loading || savingPrivacy}
                       thumbColor="#f28f3b"
                       trackColor={{ false: "#f3e1c8", true: "#f3e1c8" }}
                     />
                   </View>
                 </View>
+
+                {savingPrivacy ? (
+                  <View style={{ marginTop: 10 }}>
+                    <ActivityIndicator color="#ffffff" />
+                  </View>
+                ) : null}
               </View>
 
               {/* LOADING / ERROR */}

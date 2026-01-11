@@ -1,27 +1,29 @@
 // app/(tabs)/home.tsx
+import Ionicons from "@expo/vector-icons/Ionicons";
+import * as Linking from "expo-linking";
+import { router, useFocusEffect } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
+  AppState,
+  AppStateStatus,
+  Image,
+  ImageBackground,
   Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
-  ImageBackground,
-  Image,
   View,
-  Alert,
 } from "react-native";
-import { router, useFocusEffect } from "expo-router";
-import * as Linking from "expo-linking";
 import QRCode from "react-native-qrcode-svg";
-import Ionicons from "@expo/vector-icons/Ionicons";
 
 import { ThemedText } from "@/components/themed-text";
 import { ThemedView } from "@/components/themed-view";
 import { Fonts } from "@/constants/theme";
 
-import { deleteCapsule, getCapsules } from "@/lib/capsules";
-import { deletePost, getPosts, likePost, unlikePost, PostItem } from "@/lib/posts";
+import { deleteCapsule, getAllCapsules } from "@/lib/capsules";
+import { deletePost, getPosts, likePost, PostItem, unlikePost } from "@/lib/posts";
 
 const BG = require("@/assets/images/brown-metallic-foil-background-texture-free-photo.jpg");
 
@@ -39,12 +41,10 @@ type Capsule = {
   media_url?: string | null;
   qr_url?: string | null;
 
-  // ✅ CO meta (normalizate în lib/capsules.ts)
   contributorsCount?: number | null;
   isFull?: boolean | null;
   canContribute?: boolean | null;
 
-  // ✅ delete permission (din backend / normalizat)
   canDelete?: boolean;
   isMine?: boolean;
 };
@@ -96,34 +96,34 @@ export default function HomeScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string>("");
 
-  // like state local (MVP)
   const [liked, setLiked] = useState<Record<number, boolean>>({});
   const [busyLike, setBusyLike] = useState<Record<number, boolean>>({});
 
-  // delete busy (evită double tap)
   const [busyDeletePost, setBusyDeletePost] = useState<Record<number, boolean>>({});
   const [busyDeleteCapsule, setBusyDeleteCapsule] = useState<Record<number, boolean>>({});
 
-  // ca să nu spammăm reload pe focus
   const didFirstLoad = useRef(false);
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+
+  const syncLikedMap = useCallback((pst: any[]) => {
+    setLiked((prev) => {
+      const next = { ...prev };
+      for (const p of Array.isArray(pst) ? pst : []) {
+        if (p?.id != null && next[p.id] === undefined) next[p.id] = false;
+      }
+      return next;
+    });
+  }, []);
 
   const loadAll = useCallback(async () => {
     try {
       setError("");
       setLoading(true);
 
-      const [caps, pst] = await Promise.all([getCapsules(), getPosts()]);
+      const [caps, pst] = await Promise.all([getAllCapsules(), getPosts()]);
       setCapsules(Array.isArray(caps) ? (caps as any) : []);
       setPosts(Array.isArray(pst) ? (pst as any) : []);
-
-      // init liked map only for new posts (NU resetăm ce a apăsat user-ul)
-      setLiked((prev) => {
-        const next = { ...prev };
-        for (const p of Array.isArray(pst) ? pst : []) {
-          if (next[p.id] === undefined) next[p.id] = false;
-        }
-        return next;
-      });
+      syncLikedMap(Array.isArray(pst) ? pst : []);
     } catch (e: any) {
       setError("Nu am putut încărca feed-ul. Verifică backend-ul și API URL / token.");
       setCapsules([]);
@@ -132,29 +132,21 @@ export default function HomeScreen() {
       setLoading(false);
       didFirstLoad.current = true;
     }
-  }, []);
+  }, [syncLikedMap]);
 
-  // refresh doar la posts (util după like/comment ca să vezi count real din DB)
   const reloadPostsOnly = useCallback(async () => {
     try {
       const pst = await getPosts();
       setPosts(Array.isArray(pst) ? (pst as any) : []);
-      setLiked((prev) => {
-        const next = { ...prev };
-        for (const p of Array.isArray(pst) ? pst : []) {
-          if (next[p.id] === undefined) next[p.id] = false;
-        }
-        return next;
-      });
+      syncLikedMap(Array.isArray(pst) ? pst : []);
     } catch {
       // ignore
     }
-  }, []);
+  }, [syncLikedMap]);
 
-  // refresh doar capsule (util după ce contribui la co-cap)
   const reloadCapsulesOnly = useCallback(async () => {
     try {
-      const caps = await getCapsules();
+      const caps = await getAllCapsules();
       setCapsules(Array.isArray(caps) ? (caps as any) : []);
     } catch {
       // ignore
@@ -165,13 +157,35 @@ export default function HomeScreen() {
     loadAll();
   }, [loadAll]);
 
+  /**
+   * ✅ IMPORTANT:
+   * Ca să se aplice privacy imediat după ce schimbi din Profile,
+   * pe focus refacem load complet (nu doar partial).
+   */
   useFocusEffect(
     useCallback(() => {
       if (!didFirstLoad.current) return;
-      reloadCapsulesOnly();
-      reloadPostsOnly();
-    }, [reloadCapsulesOnly, reloadPostsOnly])
+      loadAll();
+    }, [loadAll])
   );
+
+  /**
+   * ✅ Dacă user schimbă privacy și revine în app (background->active),
+   * reîncărcăm posts ca să dispară/apară instant.
+   */
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (nextState) => {
+      const prev = appStateRef.current;
+      appStateRef.current = nextState;
+
+      if (prev.match(/inactive|background/) && nextState === "active") {
+        // reload rapid (posts e suficient pt privacy)
+        reloadPostsOnly();
+      }
+    });
+
+    return () => sub.remove();
+  }, [reloadPostsOnly]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -203,12 +217,7 @@ export default function HomeScreen() {
   const goToKeyUnlock = (capsuleId: number) => router.push(`/capsule/key/${capsuleId}` as any);
 
   const openComments = (postId: number) => {
-    router.push(
-      {
-        pathname: "/post/[id]",
-        params: { id: String(postId) },
-      } as any
-    );
+    router.push({ pathname: "/post/[id]", params: { id: String(postId) } } as any);
   };
 
   const onToggleLike = async (postId: number) => {
@@ -216,7 +225,6 @@ export default function HomeScreen() {
 
     const isLiked = !!liked[postId];
 
-    // optimistic UI
     setBusyLike((m) => ({ ...m, [postId]: true }));
     setLiked((m) => ({ ...m, [postId]: !isLiked }));
     setPosts((arr) =>
@@ -232,7 +240,6 @@ export default function HomeScreen() {
       else await unlikePost(postId);
       await reloadPostsOnly();
     } catch {
-      // revert UI
       setLiked((m) => ({ ...m, [postId]: isLiked }));
       setPosts((arr) =>
         arr.map((p) =>
@@ -251,7 +258,6 @@ export default function HomeScreen() {
     router.push(`/capsule/co/${capsuleId}` as any);
   };
 
-  // ✅ DELETE Post (doar dacă canDelete)
   const onDeletePost = useCallback(
     (postId: number) => {
       if (busyDeletePost[postId]) return;
@@ -263,8 +269,6 @@ export default function HomeScreen() {
           style: "destructive",
           onPress: async () => {
             setBusyDeletePost((m) => ({ ...m, [postId]: true }));
-
-            // optimistic remove
             setPosts((arr) => arr.filter((p) => p.id !== postId));
 
             try {
@@ -283,43 +287,36 @@ export default function HomeScreen() {
     [busyDeletePost, reloadPostsOnly]
   );
 
-  // ✅ DELETE Capsule (doar dacă canDelete)
   const onDeleteCapsule = useCallback(
     (capsuleId: number) => {
       if (busyDeleteCapsule[capsuleId]) return;
 
-      Alert.alert(
-        "Șterge capsula?",
-        "Se vor șterge și contribuțiile/cheia asociată (dacă există).",
-        [
-          { text: "Anulează", style: "cancel" },
-          {
-            text: "Șterge",
-            style: "destructive",
-            onPress: async () => {
-              setBusyDeleteCapsule((m) => ({ ...m, [capsuleId]: true }));
+      Alert.alert("Șterge capsula?", "Se vor șterge și contribuțiile/cheia asociată (dacă există).", [
+        { text: "Anulează", style: "cancel" },
+        {
+          text: "Șterge",
+          style: "destructive",
+          onPress: async () => {
+            setBusyDeleteCapsule((m) => ({ ...m, [capsuleId]: true }));
+            setCapsules((arr) => arr.filter((c) => c.capsule_id !== capsuleId));
 
-              // optimistic remove
-              setCapsules((arr) => arr.filter((c) => c.capsule_id !== capsuleId));
-
-              try {
-                await deleteCapsule(capsuleId);
-                await reloadCapsulesOnly();
-              } catch (e: any) {
-                Alert.alert(
-                  "Eroare",
-                  e?.response?.data?.error ||
-                    e?.response?.data?.message ||
-                    "Nu am putut șterge capsula."
-                );
-                await reloadCapsulesOnly();
-              } finally {
-                setBusyDeleteCapsule((m) => ({ ...m, [capsuleId]: false }));
-              }
-            },
+            try {
+              await deleteCapsule(capsuleId);
+              await reloadCapsulesOnly();
+            } catch (e: any) {
+              Alert.alert(
+                "Eroare",
+                e?.response?.data?.error ||
+                  e?.response?.data?.message ||
+                  "Nu am putut șterge capsula."
+              );
+              await reloadCapsulesOnly();
+            } finally {
+              setBusyDeleteCapsule((m) => ({ ...m, [capsuleId]: false }));
+            }
           },
-        ]
-      );
+        },
+      ]);
     },
     [busyDeleteCapsule, reloadCapsulesOnly]
   );
@@ -376,10 +373,8 @@ export default function HomeScreen() {
               const isKey = c.capsule_type === "key";
               const isCo = c.capsule_type === "co";
 
-              // cover pentru time/co (poate fi cover_url sau media_url)
               const cover = !isKey ? c.cover_url || c.media_url || null : null;
 
-              // ✅ CO meta
               const required = Number(c.required_contributors ?? 0) || 0;
               const contributed = Number(c.contributorsCount ?? 0) || 0;
               const isFull = !!c.isFull || (required > 0 && contributed >= required);
@@ -425,9 +420,7 @@ export default function HomeScreen() {
                         <View style={styles.qrCard}>
                           <QRCode value={qrValue} size={140} />
                         </View>
-                        <ThemedText style={styles.qrHint}>
-                          Scanează QR-ul sau apasă „Unlock”
-                        </ThemedText>
+                        <ThemedText style={styles.qrHint}>Scanează QR-ul sau apasă „Unlock”</ThemedText>
                       </View>
                     </View>
                   ) : cover ? (
@@ -459,13 +452,10 @@ export default function HomeScreen() {
                         </View>
                       </View>
 
-                      {/* ✅ CO progress overlay */}
                       {isCo && required > 0 ? (
                         <View style={styles.coProgressWrap}>
                           <View style={styles.coProgressBar}>
-                            <View
-                              style={[styles.coProgressFill, { width: `${progressPct * 100}%` }]}
-                            />
+                            <View style={[styles.coProgressFill, { width: `${progressPct * 100}%` }]} />
                           </View>
                           <ThemedText style={styles.coProgressText}>
                             {contributed}/{required} contributors
@@ -473,7 +463,6 @@ export default function HomeScreen() {
                         </View>
                       ) : null}
 
-                      {/* ✅ CO + button */}
                       {canContribute ? (
                         <Pressable
                           onPress={(e) => {
@@ -519,17 +508,11 @@ export default function HomeScreen() {
                     ) : null}
 
                     <View style={styles.metaRow}>
-                      <ThemedText style={styles.metaText}>
-                        Created: {formatDate(c.created_at)}
-                      </ThemedText>
+                      <ThemedText style={styles.metaText}>Created: {formatDate(c.created_at)}</ThemedText>
 
                       {isCo && required > 0 ? (
                         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                          {isFull ? (
-                            <Badge text="Full" tone="archived" />
-                          ) : (
-                            <Badge text={`${contributed}/${required}`} tone="neutral" />
-                          )}
+                          {isFull ? <Badge text="Full" tone="archived" /> : <Badge text={`${contributed}/${required}`} tone="neutral" />}
 
                           <Pressable
                             onPress={() => router.push(`/capsule/${c.capsule_id}` as any)}
@@ -684,7 +667,12 @@ const styles = StyleSheet.create({
   },
 
   keyTop: { padding: 12, gap: 12, backgroundColor: "rgba(255,255,255,0.92)" },
-  keyBadgesRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 10 },
+  keyBadgesRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 10,
+  },
 
   qrWrap: { alignItems: "center", gap: 8, paddingBottom: 6 },
   qrCard: {
@@ -710,7 +698,6 @@ const styles = StyleSheet.create({
     gap: 10,
   },
 
-  // ✅ small trash buttons (în flow, nu absolute)
   trashMini: {
     width: 34,
     height: 34,
@@ -732,7 +719,6 @@ const styles = StyleSheet.create({
     borderColor: "rgba(0,0,0,0.10)",
   },
 
-  // ✅ CO progress overlay
   coProgressWrap: {
     position: "absolute",
     left: 12,
@@ -759,7 +745,6 @@ const styles = StyleSheet.create({
     fontFamily: Fonts.rounded,
   },
 
-  // ✅ CO plus button
   coPlusBtn: {
     position: "absolute",
     right: 12,
