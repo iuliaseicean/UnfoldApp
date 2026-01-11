@@ -20,6 +20,14 @@ const {
   getUniqueContributorsCount,
 } = require("../services/capsule.service");
 
+// ✅ Varianta A: tabelă separată pt privacy
+let UserSettings = null;
+try {
+  UserSettings = require("../models/UserSettings");
+} catch {
+  UserSettings = null;
+}
+
 /**
  * Helpers
  */
@@ -56,8 +64,6 @@ function getCapsuleOwnerField() {
 
 /**
  * APP_URL pentru payload QR (NU îl salvăm în DB)
- * Pune în backend/.env:
- * APP_URL=https://xxxx.ngrok-free.app
  */
 function getAppUrl(req) {
   if (process.env.APP_URL) return process.env.APP_URL;
@@ -68,13 +74,11 @@ function getAppUrl(req) {
 }
 
 function qrPayloadForCapsule(req, capsuleId) {
-  // expo-router: app/capsule/key/[id].tsx => /capsule/key/:id
   return `${getAppUrl(req)}/capsule/key/${capsuleId}`;
 }
 
 /**
  * Filtrăm payload-ul doar pe coloanele existente în model
- * ca să nu crape pe DB cu "invalid column".
  */
 function pickModelFields(model, data) {
   const allowed = new Set(Object.keys(model?.rawAttributes || {}));
@@ -100,7 +104,7 @@ function orderByCreated(model, dir = "DESC") {
 }
 
 /**
- * Safe user attrs (fără parolă) - compatibil cu id / user_id
+ * Safe user attrs (fără parolă)
  */
 function getSafeUserAttrs() {
   const u = User?.rawAttributes || {};
@@ -113,6 +117,107 @@ function getSafeUserAttrs() {
   if (u.avatar_url) safe.push("avatar_url");
   return safe.length ? safe : undefined;
 }
+
+/* ───────────────────── Privacy (Varianta A) ───────────────────── */
+
+/**
+ * Returnează setul de user_id care sunt private (is_private=true)
+ */
+async function getPrivateUserIdSet(userIds) {
+  const ids = (Array.isArray(userIds) ? userIds : [])
+    .map((x) => Number(x))
+    .filter((x) => Number.isFinite(x) && x > 0);
+
+  if (!ids.length) return new Set();
+  if (!UserSettings) return new Set(); // fallback: tot public
+
+  try {
+    const rows = await UserSettings.findAll({
+      where: { user_id: ids, is_private: true },
+      attributes: ["user_id"],
+      raw: true,
+    });
+    return new Set(rows.map((r) => Number(r.user_id)));
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * Filtru privacy pentru capsule:
+ * - capsule ale userilor publici -> ok
+ * - capsule ale userilor private -> doar owner le vede
+ */
+async function applyPrivacyFilterToCapsules(req, capsules) {
+  const meId = Number(getAuthUserId(req) || 0);
+  if (!meId) return [];
+
+  const ownerField = getCapsuleOwnerField();
+  const arr = Array.isArray(capsules) ? capsules : [];
+
+  const ownerIds = arr
+    .map((c) => {
+      const row = typeof c?.toJSON === "function" ? c.toJSON() : c;
+      return Number(
+        row?.[ownerField] ??
+          (typeof c?.get === "function" ? c.get(ownerField) : c?.[ownerField])
+      );
+    })
+    .filter((x) => Number.isFinite(x) && x > 0);
+
+  const privateSet = await getPrivateUserIdSet(ownerIds);
+
+  return arr.filter((c) => {
+    const row = typeof c?.toJSON === "function" ? c.toJSON() : c;
+    const ownerId = Number(
+      row?.[ownerField] ??
+        (typeof c?.get === "function" ? c.get(ownerField) : c?.[ownerField])
+    );
+
+    if (!ownerId) return false;
+
+    // public
+    if (!privateSet.has(ownerId)) return true;
+
+    // private -> only owner
+    return ownerId === meId;
+  });
+}
+
+/**
+ * Guard privacy pentru o singură capsulă
+ */
+async function canViewCapsuleByPrivacy(req, capsule) {
+  const meId = Number(getAuthUserId(req) || 0);
+  if (!meId) return false;
+
+  const ownerField = getCapsuleOwnerField();
+  const row = typeof capsule?.toJSON === "function" ? capsule.toJSON() : capsule;
+  const ownerId = Number(
+    row?.[ownerField] ??
+      (typeof capsule?.get === "function" ? capsule.get(ownerField) : capsule?.[ownerField])
+  );
+
+  if (!ownerId) return false;
+  if (!UserSettings) return true; // fallback: public
+
+  try {
+    const settings = await UserSettings.findOne({
+      where: { user_id: ownerId },
+      attributes: ["is_private"],
+      raw: true,
+    });
+
+    const isPrivate = !!settings?.is_private;
+    if (!isPrivate) return true;
+    return ownerId === meId;
+  } catch {
+    // dacă tabela lipsește/eroare, nu blocăm
+    return true;
+  }
+}
+
+/* ───────────────────── enrich meta ───────────────────── */
 
 /**
  * Enrich pentru key meta (qr/exp/has_key)
@@ -151,10 +256,10 @@ async function enrichWithKeyMeta(req, capsules) {
 }
 
 /**
- * ✅ Enrich pentru CO meta:
+ * Enrich pentru CO meta:
  * - contributorsCount (unique users)
  * - isFull
- * - canContribute (user nu a contribuit încă, capsula nu e full, nu e archived)
+ * - canContribute
  */
 async function enrichWithCoMeta(capsules, userId) {
   const arr = Array.isArray(capsules) ? capsules : [];
@@ -179,14 +284,14 @@ async function enrichWithCoMeta(capsules, userId) {
     })
     .filter(Boolean);
 
-  // 1) contributorsCount per capsule (unique contributors)
+  // contributorsCount
   const counts = new Map();
   for (const id of coIds) {
     const cnt = await getUniqueContributorsCount(id);
     counts.set(id, Number(cnt || 0));
   }
 
-  // 2) userAlreadyContributed map
+  // userAlreadyContributed
   let contributedSet = new Set();
   if (userId && coIds.length) {
     const rows = await CapsuleContribution.findAll({
@@ -204,18 +309,15 @@ async function enrichWithCoMeta(capsules, userId) {
       return { ...row, contributorsCount: null, isFull: null, canContribute: null };
     }
 
+    const cid = Number(row.capsule_id ?? row.id);
     const required = Number(row.required_contributors || 0);
-    const cnt = Number(counts.get(Number(row.capsule_id ?? row.id)) || 0);
+    const cnt = Number(counts.get(cid) || 0);
 
     const isFull = required > 0 ? cnt >= required : false;
-    const already = contributedSet.has(Number(row.capsule_id ?? row.id));
+    const already = contributedSet.has(cid);
 
     const canContribute =
-      !already &&
-      !isFull &&
-      row.status !== "archived" &&
-      // dacă vrei să blochezi contribuțiile după open, schimbă aici:
-      row.status !== "open";
+      !already && !isFull && row.status !== "archived" && row.status !== "open";
 
     return {
       ...row,
@@ -227,7 +329,7 @@ async function enrichWithCoMeta(capsules, userId) {
 }
 
 /**
- * ✅ Enrich pentru "canDelete" (doar creatorul capsulei)
+ * Enrich pentru "canDelete" (doar creatorul capsulei)
  */
 function enrichWithCanDelete(capsules, userId) {
   const arr = Array.isArray(capsules) ? capsules : [];
@@ -244,21 +346,24 @@ function enrichWithCanDelete(capsules, userId) {
 }
 
 /**
- * Helper: aplică refresh + filtre + enrich
+ * Helper: refresh + access filter (service) + privacy filter + enrich
  */
 async function prepareListForUser(req, list, userId) {
   // refresh status
   for (const c of list) await refreshCapsuleStatus(c);
 
-  // filtrează capsulele pe care userul are voie să le vadă
-  const allowed = [];
+  // service-level access
+  const allowedByRules = [];
   for (const c of list) {
     const ok = await canUserViewCapsule(c, userId);
-    if (ok) allowed.push(c);
+    if (ok) allowedByRules.push(c);
   }
 
+  // ✅ privacy filter (UserSettings)
+  const allowedByPrivacy = await applyPrivacyFilterToCapsules(req, allowedByRules);
+
   // enrich meta
-  const withKey = await enrichWithKeyMeta(req, allowed);
+  const withKey = await enrichWithKeyMeta(req, allowedByPrivacy);
   const withCo = await enrichWithCoMeta(withKey, userId);
   const withDelete = enrichWithCanDelete(withCo, userId);
   return withDelete;
@@ -285,14 +390,15 @@ router.get("/search", auth, async (req, res, next) => {
 
     if (!whereOr.length) return res.json([]);
 
+    // fetch more then filter, ca să nu rămâi cu prea puține după privacy
     const list = await Capsule.findAll({
       where: { [Op.or]: whereOr },
       order: orderByCreated(Capsule, "DESC"),
-      limit: 50,
+      limit: 200,
     });
 
     const enriched = await prepareListForUser(req, list, userId);
-    return res.json(enriched);
+    return res.json(enriched.slice(0, 50));
   } catch (e) {
     next(e);
   }
@@ -310,11 +416,9 @@ router.post("/", auth, async (req, res, next) => {
       visibility_duration = null,
       required_contributors = null,
 
-      // media / cover (trimise de app)
       cover_url = null,
       media_url = null,
 
-      // KEY only:
       key_plain = null,
       key_expires_at = null,
     } = req.body || {};
@@ -336,9 +440,7 @@ router.post("/", auth, async (req, res, next) => {
         return res.status(400).json({ error: "key_plain is required for key capsules" });
       }
       if (!media_url || !String(media_url).trim()) {
-        return res
-          .status(400)
-          .json({ error: "media_url (image url) is required for key capsules" });
+        return res.status(400).json({ error: "media_url (image url) is required for key capsules" });
       }
     }
 
@@ -362,7 +464,7 @@ router.post("/", auth, async (req, res, next) => {
 
     const created = await Capsule.create(capsulePayload);
 
-    // CO: creatorul devine primul contributor (poza de cover devine contribuția lui)
+    // CO: creatorul devine primul contributor
     if (capsule_type === "co") {
       const firstMedia = String(media_url || cover_url || "").trim() || null;
       if (firstMedia) {
@@ -405,7 +507,6 @@ router.post("/", auth, async (req, res, next) => {
       return res.status(201).json(withDelete[0]);
     }
 
-    // default
     return res.status(201).json({ ...created.toJSON(), canDelete: true });
   } catch (e) {
     next(e);
@@ -424,6 +525,7 @@ router.get("/my", auth, async (req, res, next) => {
       order: orderByCreated(Capsule, "DESC"),
     });
 
+    // my -> nu are sens privacy filter (oricum sunt ale mele), dar păstrăm flow consistent
     const enriched = await prepareListForUser(req, list, userId);
     return res.json(enriched);
   } catch (e) {
@@ -440,13 +542,16 @@ router.get("/", auth, async (req, res, next) => {
 
     const limit = Math.min(Math.max(Number(req.query.limit || 100), 1), 200);
 
+    // fetch mai mult ca să compensăm filtrarea privacy
+    const fetchLimit = Math.min(limit * 3, 600);
+
     const list = await Capsule.findAll({
       order: orderByCreated(Capsule, "DESC"),
-      limit,
+      limit: fetchLimit,
     });
 
     const enriched = await prepareListForUser(req, list, userId);
-    return res.json(enriched);
+    return res.json(enriched.slice(0, limit));
   } catch (e) {
     next(e);
   }
@@ -483,13 +588,13 @@ router.delete("/:id", auth, async (req, res, next) => {
       return res.status(403).json({ error: "You can delete only your capsules" });
     }
 
-    const cid = Number(capsule?.get?.(getCapsulePkField()) ?? capsule?.[getCapsulePkField()] ?? id);
+    const cid = Number(
+      capsule?.get?.(getCapsulePkField()) ?? capsule?.[getCapsulePkField()] ?? id
+    );
 
-    // ștergem dependențele
     await CapsuleContribution.destroy({ where: { capsule_id: cid }, transaction: t });
     await CapsuleKey.destroy({ where: { capsule_id: cid }, transaction: t });
 
-    // ștergem capsula
     const pk = getCapsulePkField();
     await Capsule.destroy({ where: { [pk]: cid }, transaction: t });
 
@@ -516,10 +621,16 @@ router.get("/:id", auth, async (req, res, next) => {
     const userId = getAuthUserId(req);
     if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
+    // ✅ privacy guard
+    const okPrivacy = await canViewCapsuleByPrivacy(req, capsule);
+    if (!okPrivacy) return res.status(403).json({ error: "This profile is private" });
+
     const allowed = await canUserViewCapsule(capsule, userId);
     if (!allowed) return res.status(403).json({ error: "No access to this capsule" });
 
-    const canSeeContent = capsule.status === "open" || capsule.creator_id === userId;
+    // ✅ Co-Caps: contributions vizibile și când e locked
+    const canSeeContent =
+      capsule.status === "open" || capsule.creator_id === userId || capsule.capsule_type === "co";
 
     let contributions = [];
     if (canSeeContent) {
@@ -550,7 +661,6 @@ router.get("/:id", auth, async (req, res, next) => {
       };
     }
 
-    // CO meta și pe details
     let coMeta = null;
     if (capsule.capsule_type === "co") {
       const enriched = await enrichWithCoMeta([capsule], userId);
@@ -563,7 +673,6 @@ router.get("/:id", auth, async (req, res, next) => {
       };
     }
 
-    // ✅ canDelete pe details
     const ownerField = getCapsuleOwnerField();
     const ownerId = Number(capsule?.get?.(ownerField) ?? capsule?.[ownerField]);
     const canDelete = ownerId === Number(userId);
@@ -599,6 +708,10 @@ router.post("/:id/unlock", auth, async (req, res, next) => {
 
     const userId = getAuthUserId(req);
     if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    // ✅ privacy guard (înainte de join)
+    const okPrivacy = await canViewCapsuleByPrivacy(req, capsule);
+    if (!okPrivacy) return res.status(403).json({ error: "This profile is private" });
 
     const result = await joinWithKey(capsule.capsule_id, userId, String(key));
     if (!result.ok) return res.status(401).json({ error: "Invalid or expired key" });
@@ -636,10 +749,14 @@ router.post("/:id/contributions", auth, async (req, res, next) => {
     const userId = getAuthUserId(req);
     if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
+    // ✅ privacy guard
+    const okPrivacy = await canViewCapsuleByPrivacy(req, capsule);
+    if (!okPrivacy) return res.status(403).json({ error: "This profile is private" });
+
     const allowed = await canUserViewCapsule(capsule, userId);
     if (!allowed) return res.status(403).json({ error: "No access to this capsule" });
 
-    // CO rules: dacă e co și e full sau user a contribuit deja -> blocăm
+    // CO rules
     if (capsule.capsule_type === "co") {
       const required = Number(capsule.required_contributors || 0);
       const cnt = await getUniqueContributorsCount(capsule.capsule_id);
@@ -687,6 +804,10 @@ router.post("/:id/open", auth, async (req, res, next) => {
 
     const userId = getAuthUserId(req);
     if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    // ✅ privacy guard
+    const okPrivacy = await canViewCapsuleByPrivacy(req, capsule);
+    if (!okPrivacy) return res.status(403).json({ error: "This profile is private" });
 
     const allowed = await canUserViewCapsule(capsule, userId);
     if (!allowed) return res.status(403).json({ error: "No access to this capsule" });
@@ -757,6 +878,10 @@ router.post("/:id/join-with-key", auth, async (req, res, next) => {
 
     const userId = getAuthUserId(req);
     if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    // ✅ privacy guard
+    const okPrivacy = await canViewCapsuleByPrivacy(req, capsule);
+    if (!okPrivacy) return res.status(403).json({ error: "This profile is private" });
 
     if (capsule.capsule_type !== "key") {
       return res.status(409).json({ error: "join-with-key is only for key capsules" });

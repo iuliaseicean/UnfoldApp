@@ -1,6 +1,7 @@
+// backend/src/services/capsule.service.js
 const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
-const { Op, fn, col } = require("sequelize");
+const { fn, col } = require("sequelize");
 
 const Capsule = require("../models/Capsule");
 const CapsuleContribution = require("../models/CapsuleContribution");
@@ -39,11 +40,7 @@ async function refreshCapsuleStatus(capsule) {
   }
 
   // auto-archive
-  if (
-    capsule.status === "open" &&
-    capsule.opened_at &&
-    capsule.visibility_duration != null
-  ) {
+  if (capsule.status === "open" && capsule.opened_at && capsule.visibility_duration != null) {
     const expiresAt = addHours(capsule.opened_at, capsule.visibility_duration);
     if (nowDate() > expiresAt) {
       capsule.status = "archived";
@@ -69,6 +66,9 @@ async function getUniqueContributorsCount(capsuleId) {
 
 /* ───────────────────── ACCESS ───────────────────── */
 
+/**
+ * ✅ Verifică dacă user-ul are acces (a făcut join/unlock cu key-ul)
+ */
 async function userHasKeyAccess(capsuleId, userId) {
   const hit = await CapsuleAccess.findOne({
     where: { capsule_id: capsuleId, user_id: userId },
@@ -76,14 +76,28 @@ async function userHasKeyAccess(capsuleId, userId) {
   return !!hit;
 }
 
+/**
+ * ✅ Reguli de vizibilitate pentru FEED / LISTĂ
+ * - owner vede mereu
+ * - KEY: se vede în feed de oricine (ca să poată da Unlock / scana QR)
+ * - TIME/CO: public (în logica ta actuală)
+ *
+ * IMPORTANT:
+ * - AICI decidem doar dacă capsula apare în listă.
+ * - Protecția conținutului (poze/contribuții) se face în /capsules/:id.
+ */
 async function canUserViewCapsule(capsule, userId) {
   if (!capsule) return false;
-  if (capsule.creator_id === userId) return true;
 
+  // owner vede mereu
+  if (Number(capsule.creator_id) === Number(userId)) return true;
+
+  // ✅ KEY: vizibilă în feed pentru toți (altfel e "catch-22": nu o vezi, nu poți unlock)
   if (capsule.capsule_type === "key") {
-    return await userHasKeyAccess(capsule.capsule_id, userId);
+    return true;
   }
 
+  // TIME/CO: în implementarea curentă sunt vizibile pentru toți
   return true;
 }
 
@@ -178,10 +192,7 @@ async function joinWithKey(capsuleId, userId, keyValue) {
 
   if (!keyRow) return { ok: false };
 
-  if (
-    keyRow.expires_at &&
-    new Date(keyRow.expires_at).getTime() < Date.now()
-  ) {
+  if (keyRow.expires_at && new Date(keyRow.expires_at).getTime() < Date.now()) {
     return { ok: false };
   }
 
@@ -201,6 +212,7 @@ async function joinWithKey(capsuleId, userId, keyValue) {
 module.exports = {
   refreshCapsuleStatus,
   getUniqueContributorsCount,
+  userHasKeyAccess, // ✅ export (folosește-l în capsules.routes.js ca să blochezi conținutul)
   canUserViewCapsule,
   canOpenCapsule,
   attemptOpenCapsule,

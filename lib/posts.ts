@@ -127,7 +127,11 @@ function mapComment(c: any, fallbackPostId?: number): PostCommentItem {
     post_id: Number(c?.post_id ?? c?.postId ?? fallbackPostId ?? 0),
     user_id: Number(c?.user_id ?? c?.userId ?? 0),
     content_text: String(c?.content_text ?? c?.contentText ?? ""),
-    created_at: c?.created_at ? toIso(c.created_at) : c?.createdAt ? toIso(c.createdAt) : new Date().toISOString(),
+    created_at: c?.created_at
+      ? toIso(c.created_at)
+      : c?.createdAt
+      ? toIso(c.createdAt)
+      : new Date().toISOString(),
     User: mapUser(c?.User),
   };
 }
@@ -213,6 +217,7 @@ export async function addPostComment(postId: number, content_text: string): Prom
 /**
  * ✅ Posts by user (pentru pagina de profil a altui user)
  * Backend recomandat: GET /users/:id/posts
+ * - dacă user-ul e privat, backend ar trebui să returneze 403 -> întoarcem []
  * Fallback: dacă nu există endpoint-ul, filtrează local din getPosts()
  */
 export async function getPostsByUserId(userId: number): Promise<PostItem[]> {
@@ -226,6 +231,12 @@ export async function getPostsByUserId(userId: number): Promise<PostItem[]> {
   } catch (e: any) {
     const status = e?.response?.status;
 
+    // ✅ profil privat / fără acces
+    if (status === 403) {
+      return [];
+    }
+
+    // 404 -> fallback local doar dacă endpoint-ul nu există
     if (status === 404) {
       const all = await getPosts();
       return all.filter((p) => Number(p.user_id) === id);
